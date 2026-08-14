@@ -25,7 +25,22 @@ export class OpenAICompatibleProvider implements ModelProvider {
         headers: this.headers(),
         signal: AbortSignal.timeout(5000),
       });
-      return { ok: res.ok, detail: res.ok ? "reachable" : `HTTP ${res.status}` };
+      if (!res.ok) return { ok: false, detail: `endpoint error: HTTP ${res.status}` };
+      // Distinguish "endpoint reachable" from "the requested model is actually
+      // available" (e.g. Ollama running but qwen3-coder:30b not pulled yet).
+      try {
+        const data = (await res.json()) as { data?: Array<{ id?: string }> };
+        const ids = (data.data ?? []).map((m) => String(m.id ?? ""));
+        if (ids.length && !ids.some((id) => id === this.modelName || id.startsWith(`${this.modelName}:`))) {
+          return {
+            ok: false,
+            detail: `model "${this.modelName}" not found on endpoint (available: ${ids.slice(0, 5).join(", ")})`,
+          };
+        }
+      } catch {
+        // Endpoint reachable but non-standard /models payload — treat as ready.
+      }
+      return { ok: true, detail: "ready" };
     } catch (err) {
       return { ok: false, detail: `unreachable: ${String((err as Error).message)}` };
     }
