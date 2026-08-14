@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Play Lap Game Agent — Test Console</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: #0d1117; color: #e6edf3; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 24px 16px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  .muted { color: #8b949e; font-size: 12px; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 10px; padding: 16px; margin-top: 16px; }
+  label { display: block; margin: 10px 0 4px; font-weight: 600; font-size: 13px; }
+  input, textarea, select { width: 100%; background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 8px; padding: 9px; font: inherit; }
+  textarea { min-height: 84px; resize: vertical; }
+  button { background: #238636; color: #fff; border: 0; border-radius: 8px; padding: 10px 18px; font: inherit; font-weight: 600; cursor: pointer; margin-top: 12px; }
+  button.secondary { background: #21262d; border: 1px solid #30363d; }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .row > div { flex: 1; min-width: 200px; }
+  .stage { display: inline-block; padding: 2px 10px; border-radius: 999px; background: #1f6feb33; border: 1px solid #1f6feb; font-size: 12px; margin-right: 6px; }
+  .bar { height: 8px; background: #21262d; border-radius: 999px; overflow: hidden; margin: 10px 0; }
+  .bar > div { height: 100%; background: linear-gradient(90deg,#1f6feb,#238636); width: 0; transition: width .6s; }
+  pre { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px; max-height: 260px; overflow: auto; font-size: 11px; white-space: pre-wrap; word-break: break-word; }
+  iframe { width: 402px; height: 700px; max-width: 100%; border: 1px solid #30363d; border-radius: 12px; background: #000; }
+  .err { color: #f85149; }
+  .ok { color: #3fb950; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🎮 Play Lap Game Agent — Test Console</h1>
+  <div class="muted">Standalone test page. Requires the server API key (stored only in this browser tab).</div>
+
+  <div class="card">
+    <label>API Key</label>
+    <input id="key" type="password" placeholder="PLAYLAP_AGENT_API_KEY" autocomplete="off" />
+    <div class="row">
+      <div>
+        <label>Dimension</label>
+        <select id="dimension"><option value="2d">2D (Phaser)</option><option value="3d">3D (Babylon.js)</option></select>
+      </div>
+      <div>
+        <label>Language</label>
+        <select id="language"><option value="en">en</option><option value="ar">ar</option></select>
+      </div>
+    </div>
+    <label>Prompt</label>
+    <textarea id="prompt">Create a polished mobile fishing game: cast the line, wait for a bite, tap to catch, score points before the timer runs out.</textarea>
+    <button id="create">Create Game</button>
+    <span id="createMsg" class="muted"></span>
+  </div>
+
+  <div class="card" id="jobCard" style="display:none">
+    <div><b>Job:</b> <span id="jobId" class="muted"></span>
+      <span class="stage" id="stage">queued</span>
+      <span id="statusTxt" class="muted"></span>
+      <button class="secondary" id="cancel" style="margin-left:8px;padding:4px 12px">Cancel</button>
+    </div>
+    <div class="bar"><div id="prog"></div></div>
+    <b>Stage events</b>
+    <pre id="events"></pre>
+    <b>Logs (tail)</b>
+    <pre id="logs"></pre>
+    <div id="doneBox" style="display:none">
+      <div class="ok" style="margin:8px 0"><b>Completed!</b> <span id="score"></span></div>
+      <button id="playBtn" class="secondary">▶ Play the game</button>
+      <button id="dlBtn" class="secondary">⬇ Download game-build.zip</button>
+      <pre id="result"></pre>
+      <div id="frameBox"></div>
+    </div>
+    <div id="failBox" class="err" style="display:none"></div>
+  </div>
+</div>
+<script>
+const $ = (id) => document.getElementById(id);
+let jobId = null, timer = null;
+const key = () => $("key").value.trim();
+const api = (p, opts = {}) => fetch(p, { ...opts, headers: { "content-type": "application/json", authorization: "Bearer " + key(), ...(opts.headers || {}) } });
+
+$("create").onclick = async () => {
+  if (!key()) { $("createMsg").textContent = "Enter the API key first."; return; }
+  $("create").disabled = true; $("createMsg").textContent = "Submitting…";
+  try {
+    const res = await api("/v1/games", { method: "POST", body: JSON.stringify({ dimension: $("dimension").value, prompt: $("prompt").value, language: $("language").value }) });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.status);
+    jobId = data.jobId;
+    $("jobCard").style.display = "block"; $("doneBox").style.display = "none"; $("failBox").style.display = "none";
+    $("frameBox").innerHTML = ""; $("jobId").textContent = jobId;
+    $("createMsg").textContent = "Queued (position " + (data.queuePosition ?? "?") + ")";
+    clearInterval(timer); timer = setInterval(poll, 2000); poll();
+  } catch (e) { $("createMsg").textContent = "Error: " + e.message; }
+  $("create").disabled = false;
+};
+
+$("cancel").onclick = () => jobId && api(`/v1/jobs/${jobId}/cancel`, { method: "POST" });
+
+async function poll() {
+  if (!jobId) return;
+  try {
+    const job = await (await api(`/v1/jobs/${jobId}`)).json();
+    $("stage").textContent = job.stage;
+    $("statusTxt").textContent = job.status;
+    $("prog").style.width = (job.progress || 0) + "%";
+    $("events").textContent = (job.events || []).map(e => `${e.ts.slice(11,19)} [${e.stage}] ${e.note}`).join("\n");
+    const logs = await (await api(`/v1/jobs/${jobId}/logs`)).json();
+    $("logs").textContent = (logs.lines || []).map(l => { try { const o = JSON.parse(l); return `${o.ts.slice(11,19)} ${o.level} ${o.msg}`; } catch { return l; } }).join("\n");
+    if (job.status === "completed") {
+      clearInterval(timer);
+      const result = await (await api(`/v1/jobs/${jobId}/result`)).json();
+      $("doneBox").style.display = "block";
+      $("score").textContent = `quality ${result.qualityScore}/100 · ${result.engine} · ${(result.durationMs/1000).toFixed(1)}s · ${result.model}`;
+      $("result").textContent = JSON.stringify(result, null, 2);
+    } else if (job.status === "failed" || job.status === "cancelled") {
+      clearInterval(timer);
+      $("failBox").style.display = "block";
+      $("failBox").textContent = `${job.status}: ${job.error || "unknown error"}`;
+    }
+  } catch (e) { /* transient poll errors are fine */ }
+}
+
+// The game code is untrusted: request a short-lived play token (the API key
+// never goes into a URL) and run the game in a sandboxed iframe (opaque
+// origin, no access to this page's DOM or the key input).
+async function playToken() {
+  const res = await api(`/v1/jobs/${jobId}/token`, { method: "POST" });
+  if (!res.ok) throw new Error("token request failed");
+  return (await res.json()).token;
+}
+$("playBtn").onclick = async () => {
+  try {
+    const token = await playToken();
+    const f = document.createElement("iframe");
+    f.setAttribute("sandbox", "allow-scripts");
+    f.src = `/play/${jobId}/${encodeURIComponent(token)}/index.html`;
+    $("frameBox").innerHTML = "";
+    $("frameBox").appendChild(f);
+  } catch (e) { alert(e.message); }
+};
+$("dlBtn").onclick = async () => {
+  try {
+    const token = await playToken();
+    const a = document.createElement("a");
+    a.href = `/v1/jobs/${jobId}/artifact?token=${encodeURIComponent(token)}`;
+    a.download = `game-${jobId}.zip`;
+    a.click();
+  } catch (e) { alert(e.message); }
+};
+</script>
+</body>
+</html>
