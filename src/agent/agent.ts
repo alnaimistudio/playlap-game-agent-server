@@ -199,15 +199,30 @@ export async function runJob(provider: ModelProvider, job: Job, isCancelled: () 
       setStage("repairing", 70, `Repair iteration ${repairIterations}: ${report.notes.join("; ").slice(0, 140) || "QA issues"}`);
       const evidence = formatIssues(report.issues);
       const preRepairCommit = currentCommit(ws);
-      const summary = await toolLoop(provider, ws, job, `${PERSONA}\n${repairPrompt(evidence || "Unknown QA failure", ctx)}`, guard);
-      // Snapshot what this repair changed NOW — before any rollback path can
-      // erase it — so a repeated failure can show the model the failed diff.
-      if (preRepairCommit) lastRepairDiff = diffSince(ws, preRepairCommit) || lastRepairDiff;
+      const fullRepairPrompt = `${PERSONA}\n${repairPrompt(evidence || "Unknown QA failure", ctx)}`;
+      // Forensics: persist the EXACT model input for this repair. artifacts/
+      // is git-ignored, so no later rollback can erase it.
+      persistQaArtifact(ws, `repair-input-iteration-${repairIterations}.txt`, fullRepairPrompt);
+      const summary = await toolLoop(provider, ws, job, fullRepairPrompt, guard);
       // A repair is NEVER accepted until every JS file parses. The syntax
       // micro-loop has its own budget; if the model can't restore valid
       // syntax, the whole repair is reverted (valid code must never be
       // replaced by invalid code).
-      if (!(await syntaxGate(provider, ws, job, guard, setStage))) {
+      const syntaxOk = await syntaxGate(provider, ws, job, guard, setStage);
+      // Snapshot the COMPLETE repair diff (primary repair + any syntax-fix
+      // edits) NOW — after all edits, before any rollback/checkpoint can
+      // erase it — so a repeated failure can show the model the failed diff
+      // and the persisted evidence matches what actually happened.
+      if (preRepairCommit) {
+        const d = diffSince(ws, preRepairCommit, 30_000);
+        lastRepairDiff = (d ? d.slice(0, 3000) : "") || lastRepairDiff;
+        persistQaArtifact(
+          ws,
+          `repair-diff-iteration-${repairIterations}.patch`,
+          (d || "(repair produced no changes)") + (syntaxOk ? "" : "\n\n# NOTE: this repair left unfixable syntax errors and was reverted."),
+        );
+      }
+      if (!syntaxOk) {
         if (preRepairCommit) {
           pushEvent(job, "repairing", "repair introduced unfixable syntax errors — reverting the repair");
           rollbackTo(ws, preRepairCommit);
@@ -277,6 +292,21 @@ export async function runJob(provider: ModelProvider, job: Job, isCancelled: () 
  * (file, line, nearby source, Node's message) or null when clean.
  * Exported for tests.
  */
+/**
+ * Append-only forensic evidence under artifacts/qa/. The directory is
+ * git-ignored, so no checkpoint/rollback can ever delete or rewrite it —
+ * what the repair model saw is exactly what remains after the job ends.
+ */
+function persistQaArtifact(ws: Workspace, name: string, content: string): void {
+  try {
+    const dir = path.join(ws.root, "artifacts", "qa");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, name), content);
+  } catch (err) {
+    log("warn", "failed to persist QA artifact", { jobId: ws.jobId, name, error: String(err) });
+  }
+}
+
 export function checkJsSyntax(ws: Workspace): string | null {
   const jsFiles: string[] = [];
   const collect = (dir: string): void => {
