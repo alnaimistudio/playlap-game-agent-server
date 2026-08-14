@@ -108,6 +108,11 @@ export function createWorkspace(jobId: string, engine: "phaser" | "babylon"): Wo
       2,
     ),
   );
+  // QA evidence must be immune to git history: checkpoints use `add -A`, so
+  // without this ignore every rollback (`reset --hard`) would DELETE the
+  // qa-iteration-N.json files written after that checkpoint. artifacts/ is
+  // append-only forensic output — git must never track or touch it.
+  fs.writeFileSync(path.join(root, ".gitignore"), "artifacts/\n");
   git(ws, ["init", "-q"]);
   git(ws, ["add", "-A"]);
   git(ws, ["commit", "-qm", "workspace scaffold"]);
