@@ -138,6 +138,16 @@ export function currentCommit(ws: Workspace): string | null {
   }
 }
 
+/** Unified diff of workspace changes since a commit (repair evidence for the model). */
+export function diffSince(ws: Workspace, commit: string, maxChars = 3000): string {
+  try {
+    const d = git(ws, ["diff", commit, "--", ".", ":!artifacts", ":!vendor", ":!build"]);
+    return d.length > maxChars ? `${d.slice(0, maxChars)}\n… (diff truncated)` : d;
+  } catch {
+    return "";
+  }
+}
+
 /** Hard-revert the workspace to a known-good checkpoint (QA artifacts kept). */
 export function rollbackTo(ws: Workspace, commit: string): void {
   git(ws, ["reset", "--hard", "-q", commit]);
