@@ -6,7 +6,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { ToolDef } from "../model/provider.js";
 import { Workspace, safePath, enforceSizeLimit } from "./workspace.js";
 import { config } from "../config.js";
@@ -95,6 +95,22 @@ export const TOOL_DEFS: ToolDef[] = [
   },
 ];
 
+/**
+ * Immediate feedback loop: any write/edit to a .js file is syntax-checked on
+ * the spot so the model learns about a broken edit in the SAME tool result,
+ * instead of discovering it a whole build/QA cycle later.
+ */
+function syntaxWarning(file: string): string {
+  if (!file.endsWith(".js")) return "";
+  try {
+    execFileSync("node", ["--check", file], { timeout: 15_000, encoding: "utf8" });
+    return "";
+  } catch (err) {
+    const msg = String((err as any).stderr ?? err).slice(0, 600);
+    return `\nWARNING — this edit introduced a JavaScript SYNTAX ERROR. Fix it now before doing anything else:\n${msg}`;
+  }
+}
+
 function listRec(root: string, dir: string, out: string[]): void {
   for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
     if (e.name === ".git" || e.name === "node_modules") continue;
@@ -117,7 +133,7 @@ export async function executeTool(
       fs.mkdirSync(path.dirname(p), { recursive: true });
       fs.writeFileSync(p, content);
       enforceSizeLimit(ws);
-      return `Wrote ${Buffer.byteLength(content)} bytes to ${args.path}`;
+      return `Wrote ${Buffer.byteLength(content)} bytes to ${args.path}${syntaxWarning(p)}`;
     }
     case "read_file": {
       const p = safePath(ws, String(args.path ?? ""));
@@ -131,7 +147,7 @@ export async function executeTool(
       const find = String(args.find ?? "");
       if (!find || !text.includes(find)) return "ERROR: snippet not found in file";
       fs.writeFileSync(p, text.replace(find, String(args.replace ?? "")));
-      return "Edit applied.";
+      return `Edit applied.${syntaxWarning(p)}`;
     }
     case "list_files": {
       const base = args.dir ? safePath(ws, String(args.dir)) : ws.root;
