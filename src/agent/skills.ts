@@ -63,10 +63,19 @@ export function repairPrompt(report: string, ctx: RepairContext = {}): string {
   return `PHASE: repairing
 The game failed QA. Work root-cause first: read the evidence below (it includes files, lines, stacks and state), open the offending files, state the root cause to yourself, then make the smallest correct fix. Re-check syntax with node --check after editing. When fixed, call done with a one-line summary of the root cause you fixed.
 Rules:
+- Prefer SMALL, TARGETED edit_file changes over rewriting whole files — rewriting a large working file is how regressions and syntax errors happen.
 - Do NOT rewrite or delete required infrastructure: vendor/ engine files, src/playlap-test.js, or the engine <script> ordering in index.html — unless the evidence explicitly reports an infrastructure issue.
 - Do NOT call done without editing anything.
 - Keep the __PLAYLAP_TEST__ contract fields updated: scene, state, score, gameOver, paused.
 ${extra.length ? `\n${extra.join("\n\n")}\n` : ""}
 QA evidence:
 ${report}`;
+}
+
+/** Focused micro-prompt: a previous edit broke JS syntax — fix ONLY that. */
+export function syntaxFixPrompt(error: string): string {
+  return `PHASE: repairing
+URGENT SYNTAX FIX: a previous edit introduced invalid JavaScript. The game cannot even parse. Do NOT work on gameplay or QA issues right now — fix ONLY the syntax error below, with the smallest possible edit_file change (do not rewrite the whole file). The error includes the file, line and surrounding source. After fixing, verify with run_command node --check <file>, then call done.
+
+${error}`;
 }
