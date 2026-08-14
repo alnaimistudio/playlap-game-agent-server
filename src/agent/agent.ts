@@ -19,6 +19,7 @@ import {
   currentCommit,
   rollbackTo,
   rollbackToLastCheckpoint,
+  diffSince,
 } from "./workspace.js";
 import { TOOL_DEFS, executeTool } from "./tools.js";
 import { PERSONA, planningPrompt, codingPrompt, repairPrompt, syntaxFixPrompt, RepairContext } from "./skills.js";
@@ -108,6 +109,9 @@ export async function runJob(provider: ModelProvider, job: Job, isCancelled: () 
     let lastGoodCommit: string | null = null;
     const attemptedSignatures: string[] = [];
     const attemptHistory: string[] = [];
+    // Diff of what the previous repair changed, snapshotted BEFORE any
+    // rollback (after a revert, recomputing the diff would yield nothing).
+    let lastRepairDiff: string | null = null;
     let rolledBack = false;
     // Hard cap on total loop passes so separated budgets can never spin forever.
     const maxLoopPasses = config.maxBuildIterations + config.maxRepairIterations + 4;
@@ -184,11 +188,21 @@ export async function runJob(provider: ModelProvider, job: Job, isCancelled: () 
       const sig = issueSignature(report.issues);
       const repeatedFailure = attemptedSignatures.includes(sig);
       attemptedSignatures.push(sig);
-      const ctx: RepairContext = { repeatedFailure, rolledBack, previousAttempts: attemptHistory };
+      // If the same failure survived the previous repair, show the model
+      // exactly what that repair changed so it stops iterating on a dead end.
+      const ctx: RepairContext = {
+        repeatedFailure,
+        rolledBack,
+        previousAttempts: attemptHistory,
+        previousDiff: repeatedFailure && lastRepairDiff ? lastRepairDiff : undefined,
+      };
       setStage("repairing", 70, `Repair iteration ${repairIterations}: ${report.notes.join("; ").slice(0, 140) || "QA issues"}`);
       const evidence = formatIssues(report.issues);
       const preRepairCommit = currentCommit(ws);
       const summary = await toolLoop(provider, ws, job, `${PERSONA}\n${repairPrompt(evidence || "Unknown QA failure", ctx)}`, guard);
+      // Snapshot what this repair changed NOW — before any rollback path can
+      // erase it — so a repeated failure can show the model the failed diff.
+      if (preRepairCommit) lastRepairDiff = diffSince(ws, preRepairCommit) || lastRepairDiff;
       // A repair is NEVER accepted until every JS file parses. The syntax
       // micro-loop has its own budget; if the model can't restore valid
       // syntax, the whole repair is reverted (valid code must never be
