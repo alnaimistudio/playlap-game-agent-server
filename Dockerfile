@@ -23,8 +23,19 @@ RUN git clone --depth 1 --branch ${LLAMA_CPP_TAG} https://github.com/ggml-org/ll
     && cp /opt/llama-src/build/bin/llama-server /opt/llama/bin/ \
     && cp /opt/llama-src/build/bin/*.so* /opt/llama/bin/ 2>/dev/null || true
 
+# --- Stage 1b: empty llama placeholder (LOCAL_WINDOWS mode) -----------------
+# When the model runs OUTSIDE the container (e.g. Ollama on the Windows host),
+# there is no need to compile llama.cpp. docker-compose.yml selects this stage
+# via the LLAMA_FROM build arg to skip the long CUDA build entirely.
+FROM ubuntu:22.04 AS llama-empty
+RUN mkdir -p /opt/llama/bin
+
+# --- Stage 1c: selectable llama source (default: real build) ----------------
+ARG LLAMA_FROM=llama-build
+FROM ${LLAMA_FROM} AS llama-src
+
 # --- Stage 2: runtime image -------------------------------------------------
-FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04
+FROM nvidia/cuda:12.4.1-runtime-ubuntu22.04 AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive \
     NODE_ENV=production \
@@ -43,7 +54,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # --- llama.cpp server (compiled in stage 1) ---
-COPY --from=llama-build /opt/llama/bin /opt/llama/bin
+COPY --from=llama-src /opt/llama/bin /opt/llama/bin
 ENV PATH="/opt/llama/bin:${PATH}" \
     LD_LIBRARY_PATH="/opt/llama/bin:${LD_LIBRARY_PATH}"
 
