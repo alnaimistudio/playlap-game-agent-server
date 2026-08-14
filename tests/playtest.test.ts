@@ -120,3 +120,21 @@ document.addEventListener('keydown', bump);`,
   assert.strictEqual(report.ok, true, `expected pass, issues: ${JSON.stringify(report.issues.map((i) => i.message))}`);
   assert.ok(report.changedHookFields.includes("score"));
 });
+
+test("lifecycle exception is mapped to exact generated source line with snippet", { skip }, async () => {
+  const { ws, buildDir } = makeBuild("phaser", {
+    "index.html": page("<div></div>"),
+    "src/playlap-test.js": TEST_HELPER_SOURCE,
+    "src/game.js": `${NOISY_CANVAS}
+__PLAYLAP_TEST_SET__({ scene: 'main', state: 'play' });
+var fisher;
+fisher.graphics.clear();`,
+  });
+  const report = await playtest(ws, buildDir, "t-lifecycle", 1);
+  assert.strictEqual(report.ok, false);
+  const runtime = report.issues.find((i) => i.type === "runtime" && /reading 'graphics'/.test(i.message));
+  assert.ok(runtime, `expected runtime issue, got: ${JSON.stringify(report.issues.map((i) => i.message))}`);
+  assert.strictEqual(runtime!.file, "src/game.js");
+  assert.ok(runtime!.line, "must carry a line number");
+  assert.ok(runtime!.evidence?.includes("fisher.graphics.clear()"), `evidence must contain the offending expression, got: ${runtime!.evidence}`);
+});
