@@ -131,3 +131,23 @@ test("game code that never updates the test contract is flagged", () => {
   const issues = staticEngineChecks(ws);
   assert.ok(issues.some((i) => i.type === "testHook"));
 });
+
+test("final quality gate blocks on any surviving non-warning issue", async () => {
+  const { evaluateQuality } = await import("../src/agent/quality.js");
+  const ws = makeWs("phaser", { "build/index.html": "<html></html>", "game-design.md": "# design" });
+  const baseReport: any = {
+    ok: false, iteration: 1, engineLoaded: true, canvasPresent: true, canvasPaintedRatio: 0.3,
+    testHook: { scene: "main", state: "play", score: 1, gameOver: false, paused: false },
+    testHookBefore: null, hookContractOk: true, missingHookFields: [], interactionEffect: true,
+    changedHookFields: ["score"], blockedExternal: [], issues: [], screenshots: [], notes: [],
+    consoleErrors: [], pageErrors: [],
+  };
+  const clean = evaluateQuality(ws, { ...baseReport, issues: [{ type: "console", severity: "warning", message: "w" }] }, []);
+  assert.ok(!clean.blockers.some((b) => b.startsWith("noOutstandingIssues")), "warnings must not block");
+  const dirty = evaluateQuality(
+    ws,
+    { ...baseReport, issues: [{ type: "static", severity: "error", message: 'texture key "x" registered more than once' }] },
+    [],
+  );
+  assert.ok(dirty.blockers.some((b) => b.startsWith("noOutstandingIssues")), "surviving static error must block completion");
+});
