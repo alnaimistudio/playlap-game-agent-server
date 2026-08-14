@@ -10,6 +10,7 @@ import { execFileSync } from "node:child_process";
 import { config } from "../config.js";
 import { log } from "../logger.js";
 import { workspaceDir } from "../jobs.js";
+import { TEST_HELPER_SOURCE } from "./staticChecks.js";
 
 export interface Workspace {
   jobId: string;
@@ -91,6 +92,9 @@ export function createWorkspace(jobId: string, engine: "phaser" | "babylon"): Wo
       : path.join(config.serverRoot, "node_modules", "phaser", "dist", "phaser.min.js");
   const vendorDst = path.join(root, "vendor", engine === "babylon" ? "babylon.js" : "phaser.min.js");
   fs.copyFileSync(vendorSrc, vendorDst);
+  // Platform test-hook contract helper — the model composes with it instead
+  // of reinventing window.__PLAYLAP_TEST__ every game.
+  fs.writeFileSync(path.join(root, "src", "playlap-test.js"), TEST_HELPER_SOURCE);
   fs.writeFileSync(
     path.join(root, "package.json"),
     JSON.stringify(
@@ -123,6 +127,22 @@ export function checkpoint(ws: Workspace, message: string): void {
 export function rollbackToLastCheckpoint(ws: Workspace): void {
   git(ws, ["reset", "--hard", "-q", "HEAD"]);
   git(ws, ["clean", "-fdq", "-e", "artifacts/"]);
+}
+
+/** Current checkpoint commit hash (used for regression rollback). */
+export function currentCommit(ws: Workspace): string | null {
+  try {
+    return git(ws, ["rev-parse", "HEAD"]).trim();
+  } catch {
+    return null;
+  }
+}
+
+/** Hard-revert the workspace to a known-good checkpoint (QA artifacts kept). */
+export function rollbackTo(ws: Workspace, commit: string): void {
+  git(ws, ["reset", "--hard", "-q", commit]);
+  git(ws, ["clean", "-fdq", "-e", "artifacts/"]);
+  log("info", "workspace rolled back to checkpoint", { jobId: ws.jobId, commit });
 }
 
 export function enforceSizeLimit(ws: Workspace): void {
