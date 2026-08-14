@@ -1,0 +1,51 @@
+# Play Lap Game Agent Server — LOCAL_WINDOWS mode.
+#
+# For a Windows 11 + WSL2 + Docker Desktop machine where Ollama runs
+# DIRECTLY ON WINDOWS (not inside Docker). The container reaches it via
+# host.docker.internal:11434 (Docker Desktop provides this hostname).
+#
+# Usage:
+#   1. copy .env.local-windows to .env  (adjust if needed)
+#   2. docker compose up --build
+#   3. open http://localhost:8000/health  then  http://localhost:8000/test
+#
+# Requirements on the host: Ollama running + `ollama pull qwen3-coder:30b`.
+# No Node, Phaser, Playwright, or Chromium needed on Windows — all in the image.
+
+services:
+  game-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+      args:
+        # Skip the long in-image llama.cpp CUDA build — the model runs on the
+        # Windows host via Ollama, not inside this container.
+        LLAMA_FROM: llama-empty
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      PORT: "8000"
+      # Local mode: the model stays on the Windows host (Ollama).
+      MODEL_PROVIDER: openai-compatible
+      MODEL_BASE_URL: http://host.docker.internal:11434/v1
+      MODEL_NAME: qwen3-coder:30b
+    extra_hosts:
+      # Ensures host.docker.internal resolves even on Linux Docker engines.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - gas-workspaces:/app/workspaces
+      - gas-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+volumes:
+  gas-workspaces:
+  gas-data:
