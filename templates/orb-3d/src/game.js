@@ -136,7 +136,9 @@
       orbsRemaining: state.orbs ? state.orbs.length : TOTAL_ORBS,
       timeLeft: Math.max(0, Math.round(state.timeLeft)),
       player: state.player ? { x: +state.player.position.x.toFixed(2), z: +state.player.position.z.toFixed(2) } : null,
-      won: state.phase === "won"
+      won: state.phase === "won",
+      gameOver: state.phase === "won" || state.phase === "lost",
+      paused: false
     };
   }
 
