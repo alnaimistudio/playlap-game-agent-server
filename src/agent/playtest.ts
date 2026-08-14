@@ -14,6 +14,7 @@ import { config } from "../config.js";
 import { log } from "../logger.js";
 import { Workspace } from "./workspace.js";
 import { QAIssue, TEST_HOOK_REQUIRED_FIELDS } from "./qaTypes.js";
+import { findLocalAssetReferences, assetExistsOnDisk } from "./staticChecks.js";
 
 export interface PlaytestReport {
   ok: boolean;
@@ -198,6 +199,34 @@ export function attachSourceEvidence(issues: QAIssue[], buildDir: string): void 
   }
 }
 
+/**
+ * Resolve a browser-observed local resource failure (404 / load failure)
+ * deterministically to the workspace file and the exact source lines that
+ * reference it, so the repair model never searches blindly. Missing local
+ * files are ROOT-CAUSE fatal (file-existence is a fact, not a heuristic).
+ */
+export function missingResourceIssue(buildDir: string, requestedUrl: string, reason: string): QAIssue {
+  const normalized = requestedUrl.replace(/^\/+/, "").split("?")[0].split("#")[0];
+  const existsOnDisk = assetExistsOnDisk(buildDir, normalized);
+  const refs = findLocalAssetReferences(buildDir).filter((r) => r.assetPath === normalized);
+  const detail = {
+    requestedUrl,
+    normalizedWorkspacePath: normalized,
+    existsOnDisk,
+    referencedBy: refs.map((r) => ({ file: r.file, line: r.line, sourceLine: r.sourceLine })),
+  };
+  const strategies =
+    " — fix by choosing EXACTLY ONE strategy: (A) create the missing asset locally/procedurally, (B) change the reference to a file that ALREADY EXISTS, or (C) remove the dependency and draw it with procedural graphics. NEVER swap it for another nonexistent filename.";
+  return {
+    type: "resource",
+    severity: existsOnDisk ? "error" : "fatal",
+    file: refs[0]?.file,
+    line: refs[0]?.line,
+    message: `resource ${reason}: ${requestedUrl}${existsOnDisk ? "" : strategies}`,
+    evidence: JSON.stringify(detail, null, 2),
+  };
+}
+
 export async function playtest(ws: Workspace, buildDir: string, jobId: string, iteration = 1): Promise<PlaytestReport> {
   const report: PlaytestReport = {
     ok: false,
@@ -316,19 +345,13 @@ export async function playtest(ws: Workspace, buildDir: string, jobId: string, i
     });
     page.on("requestfailed", (req) => {
       if (!req.url().startsWith(url)) return; // external blocks already recorded
-      report.issues.push({
-        type: "resource",
-        severity: "error",
-        message: `resource failed to load: ${req.url().replace(url, "/")} (${req.failure()?.errorText ?? "unknown"})`,
-      });
+      report.issues.push(
+        missingResourceIssue(buildDir, req.url().replace(url, "/"), `failed to load (${req.failure()?.errorText ?? "unknown"})`),
+      );
     });
     page.on("response", (res) => {
       if (res.url().startsWith(url) && res.status() >= 400) {
-        report.issues.push({
-          type: "resource",
-          severity: "error",
-          message: `resource returned HTTP ${res.status()}: ${res.url().replace(url, "/")}`,
-        });
+        report.issues.push(missingResourceIssue(buildDir, res.url().replace(url, "/"), `HTTP ${res.status()}`));
       }
     });
 
