@@ -223,7 +223,9 @@
         fishCaught: this.fishCaught,
         timeLeft: this.timeLeft,
         targetScore: TARGET_SCORE,
-        won: this.won
+        won: this.won,
+        gameOver: this.state === "over" || this.won === true,
+        paused: false
       };
     }
   });
