@@ -11,15 +11,30 @@ import { config } from "../config.js";
 import { log, detachJobLogFile } from "../logger.js";
 import { Job, JobResult, Stage, pushEvent, updateJob } from "../jobs.js";
 import { ModelProvider, ChatMessage } from "../model/provider.js";
-import { Workspace, createWorkspace, checkpoint, enforceSizeLimit, currentCommit, rollbackTo } from "./workspace.js";
+import {
+  Workspace,
+  createWorkspace,
+  checkpoint,
+  enforceSizeLimit,
+  currentCommit,
+  rollbackTo,
+  rollbackToLastCheckpoint,
+} from "./workspace.js";
 import { TOOL_DEFS, executeTool } from "./tools.js";
-import { PERSONA, planningPrompt, codingPrompt, repairPrompt, RepairContext } from "./skills.js";
+import { PERSONA, planningPrompt, codingPrompt, repairPrompt, syntaxFixPrompt, RepairContext } from "./skills.js";
 import { playtest, PlaytestReport } from "./playtest.js";
 import { evaluateQuality } from "./quality.js";
 import { restoreInfrastructure, checkInfrastructure, staticEngineChecks } from "./staticChecks.js";
 import { QAIssue, fatalCount, issueSignature, formatIssues } from "./qaTypes.js";
 
 const MAX_AGENT_TURNS = 60;
+/**
+ * Syntax repairs have their OWN small budget, separate from the runtime/QA
+ * repair budget: a typo introduced while fixing runtime behavior must not
+ * consume a full QA cycle (requirement: separate BUILD/SYNTAX from RUNTIME
+ * repair attempts).
+ */
+const MAX_SYNTAX_FIXES_PER_REPAIR = 2;
 
 class JobCancelled extends Error {
   constructor() {
@@ -69,7 +84,18 @@ export async function runJob(provider: ModelProvider, job: Job, isCancelled: () 
     // ---- coding ----
     guard();
     setStage("coding", 15, "Agent is implementing the game");
-    await toolLoop(provider, ws, job, `${PERSONA}\n${codingPrompt(job.dimension, job.prompt, plan)}`, guard);
+    // Malformed coding output is never checkpointed: if the syntax gate
+    // cannot restore valid JS, revert to the clean scaffold and retry the
+    // whole coding phase once before giving up.
+    for (let codingAttempt = 1; ; codingAttempt++) {
+      await toolLoop(provider, ws, job, `${PERSONA}\n${codingPrompt(job.dimension, job.prompt, plan)}`, guard);
+      if (await syntaxGate(provider, ws, job, guard, setStage)) break;
+      if (codingAttempt >= 2) {
+        throw new Error("Coding phase produced invalid JavaScript that could not be repaired.");
+      }
+      pushEvent(job, "coding", "coding output had unfixable syntax errors — reverting to scaffold and re-implementing");
+      rollbackToLastCheckpoint(ws);
+    }
     checkpoint(ws, "coding complete");
 
     // ---- build / static-check / run / playtest / repair loop ----
@@ -83,29 +109,37 @@ export async function runJob(provider: ModelProvider, job: Job, isCancelled: () 
     const attemptedSignatures: string[] = [];
     const attemptHistory: string[] = [];
     let rolledBack = false;
+    // Hard cap on total loop passes so separated budgets can never spin forever.
+    const maxLoopPasses = config.maxBuildIterations + config.maxRepairIterations + 4;
     while (true) {
       guard();
       buildIterations += 1;
+      if (buildIterations > maxLoopPasses) {
+        throw new Error(`Exceeded ${maxLoopPasses} build/QA loop passes without converging.`);
+      }
       setStage("building", 40, `Build iteration ${buildIterations}`);
       // Protect required bootstrap infrastructure deterministically — never
       // burn a model repair on a deleted vendor file or missing hook helper.
       for (const n of restoreInfrastructure(ws)) pushEvent(job, "building", `infrastructure: ${n}`);
       buildError = buildGame(ws);
       if (buildError) {
+        // Should be rare — the syntax gate runs after every model edit phase.
+        // Safety net: micro syntax-fix loop (own budget), then rollback to
+        // last-known-good instead of failing the whole job.
         setStage("repairing", 45, `Build failed: ${buildError.slice(0, 120)}`);
-        if (repairIterations >= config.maxRepairIterations || buildIterations >= config.maxBuildIterations) {
-          throw new Error(`Build failed after ${buildIterations} iterations: ${buildError}`);
+        const fixed = await syntaxGate(provider, ws, job, guard, setStage);
+        if (fixed) {
+          checkpoint(ws, `syntax fixed at build iteration ${buildIterations}`);
+          continue;
         }
-        repairIterations += 1;
-        await toolLoop(
-          provider,
-          ws,
-          job,
-          `${PERSONA}\n${repairPrompt(`Build error:\n${buildError}`, { previousAttempts: attemptHistory })}`,
-          guard,
-        );
-        checkpoint(ws, `repair after build failure #${repairIterations}`);
-        continue;
+        if (lastGoodCommit) {
+          pushEvent(job, "repairing", "unfixable build failure — reverting to last good checkpoint");
+          rollbackTo(ws, lastGoodCommit);
+          rolledBack = true;
+          attemptHistory.push("a repair introduced unfixable syntax errors and was reverted");
+          continue;
+        }
+        throw new Error(`Build failed and could not be repaired: ${buildError}`);
       }
       checkpoint(ws, `build ok #${buildIterations}`);
 
@@ -153,7 +187,22 @@ export async function runJob(provider: ModelProvider, job: Job, isCancelled: () 
       const ctx: RepairContext = { repeatedFailure, rolledBack, previousAttempts: attemptHistory };
       setStage("repairing", 70, `Repair iteration ${repairIterations}: ${report.notes.join("; ").slice(0, 140) || "QA issues"}`);
       const evidence = formatIssues(report.issues);
+      const preRepairCommit = currentCommit(ws);
       const summary = await toolLoop(provider, ws, job, `${PERSONA}\n${repairPrompt(evidence || "Unknown QA failure", ctx)}`, guard);
+      // A repair is NEVER accepted until every JS file parses. The syntax
+      // micro-loop has its own budget; if the model can't restore valid
+      // syntax, the whole repair is reverted (valid code must never be
+      // replaced by invalid code).
+      if (!(await syntaxGate(provider, ws, job, guard, setStage))) {
+        if (preRepairCommit) {
+          pushEvent(job, "repairing", "repair introduced unfixable syntax errors — reverting the repair");
+          rollbackTo(ws, preRepairCommit);
+          rolledBack = true;
+        }
+        attemptHistory.push(`repair ${repairIterations} introduced syntax errors and was reverted — that approach is broken`);
+        if (attemptHistory.length > 6) attemptHistory.shift();
+        continue;
+      }
       attemptHistory.push(summary || report.notes[0]?.slice(0, 120) || `attempt ${repairIterations}`);
       if (attemptHistory.length > 6) attemptHistory.shift();
       checkpoint(ws, `repair #${repairIterations}`);
@@ -207,6 +256,72 @@ export async function runJob(provider: ModelProvider, job: Job, isCancelled: () 
   } finally {
     detachJobLogFile(job.jobId);
   }
+}
+
+/**
+ * Verify every JS file in src/ parses. Returns a rich, model-friendly error
+ * (file, line, nearby source, Node's message) or null when clean.
+ * Exported for tests.
+ */
+export function checkJsSyntax(ws: Workspace): string | null {
+  const jsFiles: string[] = [];
+  const collect = (dir: string): void => {
+    if (!fs.existsSync(dir)) return;
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) collect(p);
+      else if (e.name.endsWith(".js")) jsFiles.push(p);
+    }
+  };
+  collect(path.join(ws.root, "src"));
+  for (const f of jsFiles) {
+    try {
+      execFileSync("node", ["--check", f], { timeout: 15_000, encoding: "utf8" });
+    } catch (err) {
+      const raw = String((err as any).stderr ?? err);
+      const rel = path.relative(ws.root, f);
+      const lineMatch = raw.match(/:(\d+)\n/);
+      const line = lineMatch ? Number(lineMatch[1]) : undefined;
+      let context = "";
+      if (line) {
+        const source = fs.readFileSync(f, "utf8").split("\n");
+        const from = Math.max(0, line - 4);
+        const to = Math.min(source.length, line + 3);
+        context = source
+          .slice(from, to)
+          .map((l, i) => `${from + i + 1 === line ? ">>" : "  "} ${from + i + 1}| ${l}`)
+          .join("\n");
+      }
+      return `Syntax error in ${rel}${line ? ` at line ${line}` : ""}:\n${raw.slice(0, 400)}\n${context ? `Nearby source:\n${context}` : ""}`;
+    }
+  }
+  return null;
+}
+
+/**
+ * Syntax micro-loop: after ANY model edit phase, re-check all JS files and —
+ * if broken — give the model focused fix rounds with exact file/line/nearby
+ * source evidence. Separate small budget; never consumes runtime/QA repairs.
+ * Returns true when all files parse.
+ */
+async function syntaxGate(
+  provider: ModelProvider,
+  ws: Workspace,
+  job: Job,
+  guard: () => void,
+  setStage: (stage: Stage, progress: number, note: string) => void,
+): Promise<boolean> {
+  for (let attempt = 0; attempt <= MAX_SYNTAX_FIXES_PER_REPAIR; attempt++) {
+    const err = checkJsSyntax(ws);
+    if (!err) return true;
+    if (attempt === MAX_SYNTAX_FIXES_PER_REPAIR) {
+      pushEvent(job, "repairing", `syntax still broken after ${attempt} fix rounds: ${err.slice(0, 120)}`);
+      return false;
+    }
+    setStage("repairing", 68, `Syntax fix round ${attempt + 1}: ${err.split("\n")[0].slice(0, 120)}`);
+    await toolLoop(provider, ws, job, `${PERSONA}\n${syntaxFixPrompt(err)}`, guard);
+  }
+  return false;
 }
 
 /** Regression: the new iteration lost working infrastructure or added fatal failures. */
@@ -288,23 +403,8 @@ function summarizeArgs(args: Record<string, unknown>): Record<string, unknown> {
 function buildGame(ws: Workspace): string | null {
   const indexFile = path.join(ws.root, "index.html");
   if (!fs.existsSync(indexFile)) return "index.html is missing at the workspace root.";
-  const jsFiles: string[] = [];
-  const collect = (dir: string): void => {
-    if (!fs.existsSync(dir)) return;
-    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-      const p = path.join(dir, e.name);
-      if (e.isDirectory()) collect(p);
-      else if (e.name.endsWith(".js")) jsFiles.push(p);
-    }
-  };
-  collect(path.join(ws.root, "src"));
-  for (const f of jsFiles) {
-    try {
-      execFileSync("node", ["--check", f], { timeout: 15_000, encoding: "utf8" });
-    } catch (err) {
-      return `Syntax error in ${path.relative(ws.root, f)}: ${String((err as any).stderr ?? err).slice(0, 400)}`;
-    }
-  }
+  const syntaxError = checkJsSyntax(ws);
+  if (syntaxError) return syntaxError;
   const buildDir = path.join(ws.root, "build");
   fs.rmSync(buildDir, { recursive: true, force: true });
   fs.mkdirSync(buildDir, { recursive: true });
