@@ -200,6 +200,10 @@ export function staticEngineChecks(ws: Workspace): QAIssue[] {
     }
   }
 
+  if (ws.engine === "phaser") {
+    for (const f of files) issues.push(...phaserLifecycleChecks(rel(f), fs.readFileSync(f, "utf8")));
+  }
+
   if (!hookSeen) {
     issues.push({
       type: "testHook",
@@ -207,5 +211,123 @@ export function staticEngineChecks(ws: Workspace): QAIssue[] {
       message: `no game code updates the test contract — call __PLAYLAP_TEST_SET__({scene,state,score,gameOver,paused,...}) from ${ws.engine === "phaser" ? "your Scene" : "your game loop"}`,
     });
   }
+  return issues;
+}
+
+/** Scene-owned API roots that require `this` to actually be the Scene. */
+const SCENE_API = /\bthis\.(add|load|physics|anims|tweens|time|input|cameras|sound|textures|make|scene)\b/;
+
+/** Extract a function body by brace matching starting at the `{` after `start`. */
+function functionBody(code: string, start: number): { body: string; from: number } | null {
+  const open = code.indexOf("{", start);
+  if (open === -1) return null;
+  let depth = 0;
+  for (let i = open; i < code.length; i++) {
+    if (code[i] === "{") depth++;
+    else if (code[i] === "}") {
+      depth--;
+      if (depth === 0) return { body: code.slice(open + 1, i), from: open + 1 };
+    }
+  }
+  return null;
+}
+
+const lineAt = (code: string, index: number): number => code.slice(0, index).split("\n").length;
+
+/**
+ * Heuristic Phaser lifecycle/context checks — the failure class observed in
+ * real generations: scene APIs accessed where `this` is not the Scene
+ * (plain-function callbacks) or in the wrong lifecycle phase.
+ *
+ * IMPORTANT: these are regex/brace heuristics, not an AST — they can both
+ * miss violations and flag valid code (e.g. unusual scoping patterns). They
+ * are therefore emitted as severity "warning": rich evidence for the coding
+ * and repair prompts, but NEVER completion blockers. Real lifecycle bugs
+ * still block via their runtime exceptions in the browser playtest.
+ */
+export function phaserLifecycleChecks(relFile: string, code: string): QAIssue[] {
+  const issues: QAIssue[] = [];
+
+  // 1. Plain `function` callbacks that use scene APIs via `this` — `this` is
+  //    NOT the Scene inside them (setTimeout, forEach, on(), tween callbacks…)
+  //    unless explicitly bound. This is the direct cause of
+  //    "Cannot read properties of undefined (reading 'graphics'/'image')".
+  for (const m of code.matchAll(/[(,]\s*function\s*\([^)]*\)\s*\{/g)) {
+    const fb = functionBody(code, m.index + m[0].length - 1);
+    if (!fb) continue;
+    const api = fb.body.match(SCENE_API);
+    if (!api) continue;
+    const tail = code.slice(fb.from + fb.body.length, fb.from + fb.body.length + 60);
+    if (/^\s*\}\s*\.bind\(\s*this\s*\)/.test(tail)) continue;
+    // Emitter-scope argument (`on('x', fn, this)`) also preserves context.
+    if (/^\s*\}\s*,\s*this\s*\)/.test(tail)) continue;
+    // callbackScope: this in the same options object also preserves context
+    const surrounding = code.slice(Math.max(0, m.index - 200), fb.from + fb.body.length + 200);
+    if (/callbackScope\s*:\s*this/.test(surrounding)) continue;
+    issues.push({
+      type: "static",
+      severity: "warning",
+      file: relFile,
+      line: lineAt(code, m.index),
+      message: `plain function callback uses "this.${api[1]}" but "this" is NOT the Scene inside a plain function — use an arrow function, .bind(this), or callbackScope: this`,
+      evidence: fb.body.trim().split("\n").slice(0, 4).join("\n").slice(0, 300),
+    });
+  }
+
+  // 2. setTimeout/setInterval touching Scene APIs — page timers lose Scene
+  //    context and survive scene restarts; use this.time.delayedCall/addEvent.
+  for (const m of code.matchAll(/\b(setTimeout|setInterval)\s*\(/g)) {
+    const fb = functionBody(code, m.index);
+    const snippet = fb?.body ?? code.slice(m.index, m.index + 200);
+    if (SCENE_API.test(snippet)) {
+      issues.push({
+        type: "static",
+        severity: "warning",
+        file: relFile,
+        line: lineAt(code, m.index),
+        message: `${m[1]} callback touches Scene APIs — use this.time.delayedCall/addEvent instead (page timers lose Scene context and survive scene restarts)`,
+        evidence: snippet.trim().slice(0, 200),
+      });
+    }
+  }
+
+  // 3. Loading assets outside preload(): this.load.* in create()/update()
+  //    never runs without an explicit loader start — a lifecycle misuse.
+  for (const name of ["create", "update"]) {
+    const decl = code.match(new RegExp(`(?:^|[\\s;])${name}\\s*\\([^)]*\\)\\s*\\{`));
+    if (!decl || decl.index === undefined) continue;
+    const fb = functionBody(code, decl.index + decl[0].length - 1);
+    if (!fb) continue;
+    const load = fb.body.match(/\bthis\.load\.(image|spritesheet|atlas|audio|bitmapFont)\b/);
+    if (load && !/this\.load\.start\(\)/.test(fb.body)) {
+      issues.push({
+        type: "static",
+        severity: "warning",
+        file: relFile,
+        line: lineAt(code, decl.index + fb.from - decl.index) ,
+        message: `this.load.${load[1]} called inside ${name}() — the loader only runs automatically in preload(); move asset loading to preload() (or generate textures procedurally in create())`,
+      });
+    }
+  }
+
+  // 4. Creating game objects in preload(): display objects belong in create().
+  {
+    const decl = code.match(/(?:^|[\s;])preload\s*\([^)]*\)\s*\{/);
+    if (decl && decl.index !== undefined) {
+      const fb = functionBody(code, decl.index + decl[0].length - 1);
+      const bad = fb?.body.match(/\bthis\.(add|physics\.add|make)\.(\w+)\s*\(/);
+      if (fb && bad && !/^textures?$/.test(bad[2])) {
+        issues.push({
+          type: "static",
+          severity: "warning",
+          file: relFile,
+          line: lineAt(code, decl.index),
+          message: `preload() creates game objects (this.${bad[1]}.${bad[2]}) — preload is ONLY for this.load.* and texture generation; create display objects in create()`,
+          evidence: fb.body.trim().split("\n").slice(0, 4).join("\n").slice(0, 300),
+        });
+      }
+    }
+  }
+
   return issues;
 }
