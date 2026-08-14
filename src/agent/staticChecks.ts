@@ -120,8 +120,136 @@ export function checkInfrastructure(ws: Workspace): QAIssue[] {
 }
 
 /** Cheap deterministic engine-specific checks over generated code. */
+/** A local asset reference found in index.html or src JS files. */
+export interface AssetReference {
+  file: string;
+  line: number;
+  sourceLine: string;
+  assetPath: string; // normalized workspace-relative path, e.g. "assets/water.png"
+  /** true when the reference is a PROVEN resource-request sink (HTML src/href, loader call, .src=, new Audio) — not just a quoted string. */
+  sink: boolean;
+}
+
+/** Lines that provably cause a network request for the quoted path. */
+const SINK_PATTERN =
+  /(?:\b(?:src|href)\s*=|\.load\.\w+\s*\(|\bload(?:Image|Audio|Atlas|Sprite\w*)?\s*\(|new\s+Audio\s*\(|\.src\s*=|fetch\s*\(|ImportMesh|Append(?:Async)?\s*\()/i;
+
+/**
+ * Safely resolve a workspace-relative asset path: must stay inside rootDir
+ * and be a regular file. Traversal/escaped paths report as NOT existing
+ * without probing the filesystem outside the workspace (untrusted input).
+ */
+export function assetExistsOnDisk(rootDir: string, relPath: string): boolean {
+  try {
+    const base = path.resolve(rootDir);
+    const p = path.resolve(base, relPath);
+    if (!p.startsWith(base + path.sep)) return false;
+    return fs.existsSync(p) && fs.statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Deterministically scan index.html + src JS files (recursively) for local
+ * asset references (quoted strings like "assets/water.png"). Used both
+ * pre-playtest (missing files caught before Chromium launches) and to map
+ * browser 404s back to the exact source line that requested them.
+ */
+export function findLocalAssetReferences(rootDir: string): AssetReference[] {
+  const refs: AssetReference[] = [];
+  const scan = (rel: string): void => {
+    const p = path.join(rootDir, rel);
+    if (!fs.existsSync(p) || !fs.statSync(p).isFile()) return;
+    let inBlockComment = false;
+    fs.readFileSync(p, "utf8")
+      .split("\n")
+      .forEach((raw, i) => {
+        let line = raw;
+        // Cheap block-comment tracking (good enough for generated code).
+        if (inBlockComment) {
+          const end = line.indexOf("*/");
+          if (end === -1) return;
+          line = line.slice(end + 2);
+          inBlockComment = false;
+        }
+        line = line.replace(/\/\*.*?\*\//g, ""); // inline /* ... */ segments
+        const start = line.indexOf("/*");
+        if (start !== -1) {
+          line = line.slice(0, start);
+          inBlockComment = true;
+        }
+        if (/^\s*(\/\/|\*|<!--)/.test(line)) return;
+        for (const m of line.matchAll(/["'`]\/?(?:\.\/)?((?:assets|public)\/[\w ./-]+\.[A-Za-z0-9]{2,5})(?:[?#][^"'`]*)?["'`]/g)) {
+          refs.push({
+            file: rel,
+            line: i + 1,
+            sourceLine: raw.trim().slice(0, 200),
+            assetPath: m[1],
+            sink: SINK_PATTERN.test(line),
+          });
+        }
+      });
+  };
+  scan("index.html");
+  const walk = (relDir: string): void => {
+    const abs = path.join(rootDir, relDir);
+    if (!fs.existsSync(abs)) return;
+    for (const entry of fs.readdirSync(abs, { withFileTypes: true })) {
+      const rel = path.join(relDir, entry.name);
+      if (entry.isDirectory()) walk(rel);
+      else if (entry.name.endsWith(".js")) scan(rel);
+    }
+  };
+  walk("src");
+  return refs;
+}
+
+/**
+ * Pre-playtest resource validation: every referenced local asset must exist
+ * on disk. Missing-file existence is a deterministic fact, but only PROVEN
+ * request sinks (HTML src/href, loader calls) may be fatal under the strict
+ * gate — an ambiguous quoted string (unused constant, prose) is advisory
+ * (warning) and left to browser observation to confirm.
+ */
+export function localResourceChecks(rootDir: string): QAIssue[] {
+  const missing = new Map<string, AssetReference[]>();
+  for (const ref of findLocalAssetReferences(rootDir)) {
+    if (assetExistsOnDisk(rootDir, ref.assetPath)) continue;
+    const list = missing.get(ref.assetPath) ?? [];
+    list.push(ref);
+    missing.set(ref.assetPath, list);
+  }
+  const issues: QAIssue[] = [];
+  for (const [asset, refs] of missing) {
+    const proven = refs.some((r) => r.sink);
+    issues.push({
+      type: "resource",
+      severity: proven ? "fatal" : "warning",
+      file: refs[0].file,
+      line: refs[0].line,
+      message:
+        `referenced local asset does not exist on disk: ${asset} — fix by choosing EXACTLY ONE strategy: ` +
+        `(A) create the missing asset locally/procedurally, (B) change the reference to a file that ALREADY EXISTS, ` +
+        `or (C) remove the dependency and draw it with procedural graphics. NEVER swap it for another nonexistent filename.`,
+      evidence: JSON.stringify(
+        {
+          requestedUrl: `/${asset}`,
+          normalizedWorkspacePath: asset,
+          existsOnDisk: false,
+          referencedBy: refs.map((r) => ({ file: r.file, line: r.line, sourceLine: r.sourceLine })),
+        },
+        null,
+        2,
+      ),
+    });
+  }
+  return issues;
+}
+
 export function staticEngineChecks(ws: Workspace): QAIssue[] {
   const issues: QAIssue[] = [];
+  issues.push(...localResourceChecks(ws.root));
   const files = listJsFiles(ws).filter((f) => !f.endsWith(path.basename(TEST_HELPER_FILE)));
   const rel = (f: string): string => path.relative(ws.root, f);
 
