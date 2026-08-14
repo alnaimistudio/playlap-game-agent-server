@@ -63,11 +63,16 @@ export function evaluateQuality(ws: Workspace, report: PlaytestReport, polishNot
     true,
   );
   add("visualUsability", report.canvasPresent && report.canvasPaintedRatio >= 0.05, `paint density ${report.canvasPaintedRatio.toFixed(2)}`, true);
-  const staticBad = report.issues.filter((i) => (i.type === "static" || i.type === "infrastructure") && i.severity !== "warning");
+  // Strict: ANY non-warning issue that survived all repair rounds blocks
+  // completion — static, infrastructure, resource, hook, console, runtime or
+  // interaction alike. Warnings never block.
+  const outstanding = report.issues.filter((i) => i.severity !== "warning");
   add(
-    "staticChecks",
-    staticBad.length === 0,
-    staticBad.length === 0 ? "no static/infrastructure findings" : staticBad.slice(0, 3).map((i) => i.message.slice(0, 80)).join(" | "),
+    "noOutstandingIssues",
+    outstanding.length === 0,
+    outstanding.length === 0
+      ? "no unresolved QA findings"
+      : outstanding.slice(0, 3).map((i) => `${i.type}: ${i.message.slice(0, 70)}`).join(" | "),
     true,
   );
   add("mobileControls", !polishNotes.some((n) => n.includes("no touch")), polishNotes.join("; ") || "touch handlers present");
