@@ -14,6 +14,7 @@ Non-negotiable conventions:
 - index.html script order is REQUIRED INFRASTRUCTURE: engine <script> first, then src/playlap-test.js, then your game scripts. Do not delete or rewrite vendor/ files or src/playlap-test.js.
 - PLATFORM TEST CONTRACT: the pre-created src/playlap-test.js exposes window.__PLAYLAP_TEST__ and window.__PLAYLAP_TEST_SET__(patch). Your game code MUST keep it updated with at least { scene, state, score, gameOver, paused } plus any useful game-specific state (health, level, lives...). Call __PLAYLAP_TEST_SET__ whenever these change. QA fails the game if this contract is absent or stale.
 - Phaser gotchas you must avoid: never register the same texture/asset key twice; timer/event callbacks that use instance methods need callbackScope: this (or arrow functions); create the game only after the engine script has loaded.
+- Phaser LIFECYCLE RULES (violations crash at runtime): preload() is ONLY for this.load.* and texture generation — never create display objects there; create display objects, physics and input in create(); never call this.load.* from create()/update(); inside any plain function(){} callback "this" is NOT the Scene — use arrow functions, .bind(this) or callbackScope: this; never use setTimeout/setInterval for game logic — use this.time.delayedCall/addEvent.
 - Mobile first: touch controls, responsive canvas, readable text, large buttons, safe-area padding, portrait unless the design needs landscape, conservative performance (mobile GPU).
 - Generate art procedurally (canvas/graphics APIs) — do not reference external assets you cannot create.
 - Keep files small and focused. Verify JS syntax with run_command node --check.`;
@@ -43,6 +44,8 @@ export interface RepairContext {
   rolledBack?: boolean;
   /** Short history of what previous repair attempts tried. */
   previousAttempts?: string[];
+  /** Unified diff of what the previous repair actually changed. */
+  previousDiff?: string;
 }
 
 export function repairPrompt(report: string, ctx: RepairContext = {}): string {
@@ -60,8 +63,15 @@ export function repairPrompt(report: string, ctx: RepairContext = {}): string {
   if (ctx.previousAttempts?.length) {
     extra.push(`Previous repair attempts (do not repeat them):\n${ctx.previousAttempts.map((a, i) => `${i + 1}. ${a}`).join("\n")}`);
   }
+  if (ctx.previousDiff) {
+    extra.push(`Exact changes made by the PREVIOUS repair (it did not fix the problem — do not repeat this approach):\n\`\`\`diff\n${ctx.previousDiff}\n\`\`\``);
+  }
   return `PHASE: repairing
-The game failed QA. Work root-cause first: read the evidence below (it includes files, lines, stacks and state), open the offending files, state the root cause to yourself, then make the smallest correct fix. Re-check syntax with node --check after editing. When fixed, call done with a one-line summary of the root cause you fixed.
+The game failed QA. Work root-cause first: read the evidence below (it includes files, lines, stacks, and the exact offending source lines), open the offending files, state the root cause to yourself, then make the smallest correct fix. Re-check syntax with node --check after editing. When fixed, call done with a one-line summary of the root cause you fixed.
+Diagnosis guide:
+- If the evidence has a ROOT-CAUSE section, fix ONLY those first. Items marked LIKELY DOWNSTREAM (no interaction, stale hook, blank screen) are usually consequences of the fatal error — do not redesign them.
+- "Cannot read properties of undefined (reading 'graphics'/'image'/'add'/...)" on a Scene API almost always means "this" is not the Scene at that point: a plain function() callback, code running in the wrong lifecycle phase, or scene systems used before initialization. Fix the context/lifecycle (arrow function, .bind(this), callbackScope: this, move code from preload() to create()) — NEVER hide the error with try/catch or optional chaining.
+- preload() is only for this.load.* and texture generation; display objects/physics/input belong in create(); this.load.* does nothing in create()/update().
 Rules:
 - Prefer SMALL, TARGETED edit_file changes over rewriting whole files — rewriting a large working file is how regressions and syntax errors happen.
 - Do NOT rewrite or delete required infrastructure: vendor/ engine files, src/playlap-test.js, or the engine <script> ordering in index.html — unless the evidence explicitly reports an infrastructure issue.
