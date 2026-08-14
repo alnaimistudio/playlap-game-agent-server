@@ -167,6 +167,37 @@ async function readHook(page: Page): Promise<Record<string, unknown> | null> {
     .catch(() => null);
 }
 
+/**
+ * For every issue that has a file+line but no source evidence, read the built
+ * source and embed the offending line ±3 with a `>>` marker. Exported for tests.
+ */
+export function attachSourceEvidence(issues: QAIssue[], buildDir: string): void {
+  const base = path.resolve(buildDir);
+  for (const issue of issues) {
+    if (!issue.file || !issue.line || issue.evidence) continue;
+    try {
+      // issue.file comes from an UNTRUSTED game's Error.stack — contain it:
+      // must resolve inside buildDir and inside a known built content dir.
+      const rel = issue.file.replace(/^\/+/, "");
+      const p = path.resolve(base, rel);
+      if (!p.startsWith(base + path.sep)) continue;
+      const inside = path.relative(base, p);
+      if (!/^(src|assets|public)[\\/]/.test(inside) && inside !== "index.html") continue;
+      if (!fs.existsSync(p)) continue;
+      const lines = fs.readFileSync(p, "utf8").split("\n");
+      if (issue.line > lines.length) continue;
+      const from = Math.max(0, issue.line - 4);
+      const to = Math.min(lines.length, issue.line + 3);
+      issue.evidence = lines
+        .slice(from, to)
+        .map((l, i) => `${from + i + 1 === issue.line ? ">>" : "  "} ${from + i + 1}| ${l}`)
+        .join("\n");
+    } catch {
+      /* evidence is best-effort */
+    }
+  }
+}
+
 export async function playtest(ws: Workspace, buildDir: string, jobId: string, iteration = 1): Promise<PlaytestReport> {
   const report: PlaytestReport = {
     ok: false,
@@ -260,15 +291,27 @@ export async function playtest(ws: Workspace, buildDir: string, jobId: string, i
     page.on("pageerror", (e) => {
       report.pageErrors.push(String(e.message).slice(0, 300));
       consoleLog.push(`[pageerror] ${e.message}\n${e.stack ?? ""}`);
-      const frame = (e.stack ?? "").split("\n").find((l) => l.includes(url));
-      const m = frame?.match(/([^\/\s]+\.js):(\d+)/);
+      // Map the exception to the FIRST stack frame inside generated game code
+      // (skip vendor engine frames) so the repair sees the exact offending
+      // source expression, not just the exception text.
+      const cleanStack = (e.stack ?? "").replace(new RegExp(url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"), "/");
+      let file: string | undefined;
+      let line: number | undefined;
+      for (const frame of cleanStack.split("\n")) {
+        const m = frame.match(/\/((?:src|assets|public)\/[\w./-]+\.js):(\d+)(?::(\d+))?/) ?? frame.match(/\/([\w.-]+\.js):(\d+)(?::(\d+))?/);
+        if (m && !m[1].startsWith("vendor/")) {
+          file = m[1];
+          line = Number(m[2]);
+          break;
+        }
+      }
       report.issues.push({
         type: "runtime",
         severity: "fatal",
         message: String(e.message).slice(0, 400),
-        stack: (e.stack ?? "").replace(new RegExp(url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"), "/").slice(0, 1200),
-        file: m?.[1],
-        line: m ? Number(m[2]) : undefined,
+        stack: cleanStack.slice(0, 1200),
+        file,
+        line,
       });
     });
     page.on("requestfailed", (req) => {
@@ -442,6 +485,9 @@ export async function playtest(ws: Workspace, buildDir: string, jobId: string, i
     await browser?.close().catch(() => undefined);
     close();
   }
+  // Attach the exact offending source lines to every located issue so the
+  // repair model never has to guess from an exception message alone.
+  attachSourceEvidence(report.issues, buildDir);
   // Persist QA evidence for later debugging (structured report + console log).
   try {
     fs.writeFileSync(path.join(qaDir, `qa-iteration-${iteration}.json`), JSON.stringify(report, null, 2));
