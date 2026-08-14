@@ -1,26 +1,39 @@
 /**
  * Real-browser QA: serve the build, open it in headless Chromium via
- * Playwright, capture console + page errors, take screenshots, poke the game
- * through taps/keys, and read window.__PLAYLAP_TEST__.
+ * Playwright, capture rich diagnostics (page errors with stacks, console
+ * errors/warnings with source locations, failed resource loads, engine
+ * initialization), verify the __PLAYLAP_TEST__ platform contract, discover
+ * and exercise interactive elements, and persist structured QA artifacts
+ * (artifacts/qa/qa-iteration-N.json + console log + screenshots).
  */
 import fs from "node:fs";
 import path from "node:path";
 import http from "node:http";
-import { chromium, Browser } from "playwright-core";
+import { chromium, Browser, Page } from "playwright-core";
 import { config } from "../config.js";
 import { log } from "../logger.js";
 import { Workspace } from "./workspace.js";
+import { QAIssue, TEST_HOOK_REQUIRED_FIELDS } from "./qaTypes.js";
 
 export interface PlaytestReport {
   ok: boolean;
-  consoleErrors: string[];
-  pageErrors: string[];
-  testHook: Record<string, unknown> | null;
+  iteration: number;
+  engineLoaded: boolean;
   canvasPresent: boolean;
   canvasPaintedRatio: number; // 0..1 non-background pixel ratio of screenshot
+  testHook: Record<string, unknown> | null; // last hook snapshot
+  testHookBefore: Record<string, unknown> | null;
+  hookContractOk: boolean;
+  missingHookFields: string[];
   interactionEffect: boolean; // game state changed after simulated input
+  changedHookFields: string[];
+  blockedExternal: string[]; // external URLs the game tried to reach
+  issues: QAIssue[];
   screenshots: string[];
   notes: string[];
+  // kept for backwards compatibility with logs/events
+  consoleErrors: string[];
+  pageErrors: string[];
 }
 
 const MIME: Record<string, string> = {
@@ -75,10 +88,10 @@ async function launchBrowser(): Promise<Browser> {
     // --enable-gpu + ignore-blocklist makes WebGL (software path) work in
     // headless chromium both on Nix and in the Docker image.
     // Chromium's sandbox stays ON by default (the game code is untrusted).
-    // CHROMIUM_NO_SANDBOX=1 is a dev-environment escape hatch for hosts where
-    // the sandbox cannot start (e.g. Replit/NixOS); never set it in production.
+    // CHROMIUM_NO_SANDBOX=1 / ALLOW_NO_SANDBOX=1 is an escape hatch for hosts
+    // where the sandbox cannot start (e.g. Replit/NixOS, RunPod).
     args: [
-      ...(process.env.CHROMIUM_NO_SANDBOX === "1" ? ["--no-sandbox"] : []),
+      ...(process.env.CHROMIUM_NO_SANDBOX === "1" || process.env.ALLOW_NO_SANDBOX === "1" ? ["--no-sandbox"] : []),
       "--disable-dev-shm-usage",
       "--enable-gpu",
       "--ignore-gpu-blocklist",
@@ -129,20 +142,56 @@ function paintedRatio(png: Buffer): number {
   return Math.max(0, Math.min(1, bytesPerPixel / 0.15));
 }
 
-export async function playtest(ws: Workspace, buildDir: string, jobId: string): Promise<PlaytestReport> {
+/** Diff two hook snapshots; returns the names of top-level fields that changed. */
+function diffHook(before: Record<string, unknown> | null, after: Record<string, unknown> | null): string[] {
+  if (!before || !after) return [];
+  const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+  const changed: string[] = [];
+  for (const k of keys) {
+    if (JSON.stringify(before[k]) !== JSON.stringify(after[k])) changed.push(k);
+  }
+  return changed;
+}
+
+async function readHook(page: Page): Promise<Record<string, unknown> | null> {
+  return page
+    .evaluate(() => {
+      const h = (window as any).__PLAYLAP_TEST__;
+      if (!h) return null;
+      try {
+        return JSON.parse(JSON.stringify(h, (_k, v) => (typeof v === "function" ? undefined : v)));
+      } catch {
+        return { unserializable: true };
+      }
+    })
+    .catch(() => null);
+}
+
+export async function playtest(ws: Workspace, buildDir: string, jobId: string, iteration = 1): Promise<PlaytestReport> {
   const report: PlaytestReport = {
     ok: false,
-    consoleErrors: [],
-    pageErrors: [],
-    testHook: null,
+    iteration,
+    engineLoaded: false,
     canvasPresent: false,
     canvasPaintedRatio: 0,
+    testHook: null,
+    testHookBefore: null,
+    hookContractOk: false,
+    missingHookFields: [],
     interactionEffect: false,
+    changedHookFields: [],
+    blockedExternal: [],
+    issues: [],
     screenshots: [],
     notes: [],
+    consoleErrors: [],
+    pageErrors: [],
   };
   const shotsDir = path.join(ws.root, "artifacts", "screenshots");
+  const qaDir = path.join(ws.root, "artifacts", "qa");
   fs.mkdirSync(shotsDir, { recursive: true });
+  fs.mkdirSync(qaDir, { recursive: true });
+  const consoleLog: string[] = [];
   const { url, close } = await serveDir(buildDir);
   let browser: Browser | null = null;
   try {
@@ -158,14 +207,87 @@ export async function playtest(ws: Workspace, buildDir: string, jobId: string): 
     // hosts) is aborted at the browser layer.
     await context.route("**/*", (route) => {
       if (route.request().url().startsWith(url)) return route.continue();
-      report.notes.push(`blocked network request: ${route.request().url().slice(0, 120)}`);
+      const blocked = route.request().url().slice(0, 160);
+      report.blockedExternal.push(blocked);
+      report.issues.push({
+        type: "resource",
+        severity: "error",
+        message: `blocked external network request (games must be offline): ${blocked}`,
+      });
       return route.abort("accessdenied");
     });
+    // context.route() only covers HTTP(S); close the remaining egress
+    // channels (WebSocket, WebRTC, SSE to foreign origins, beacons) inside
+    // the page itself. Defense-in-depth: production deployments must ALSO
+    // default-deny outbound traffic at the container/network layer.
+    // NOTE: passed as a string — function form gets rewritten by the tsx/esbuild
+    // transform (injects an `__name` helper that doesn't exist in the page).
+    await context.addInitScript(`(function () {
+      function deny(name) {
+        window[name] = function () {
+          throw new Error(name + " is disabled in the Play Lap QA sandbox (games must be offline)");
+        };
+      }
+      deny("WebSocket");
+      deny("RTCPeerConnection");
+      deny("EventSource");
+      try { navigator.sendBeacon = function () { return false; }; } catch (e) {}
+    })();`);
     const page = await context.newPage();
     page.on("console", (m) => {
-      if (m.type() === "error") report.consoleErrors.push(m.text().slice(0, 300));
+      const loc = m.location();
+      const file = loc.url ? loc.url.replace(url, "") : undefined;
+      consoleLog.push(`[${m.type()}] ${file ?? ""}:${loc.lineNumber ?? ""} ${m.text()}`);
+      if (m.type() === "error") {
+        report.consoleErrors.push(m.text().slice(0, 300));
+        report.issues.push({
+          type: "console",
+          severity: "error",
+          message: m.text().slice(0, 400),
+          file,
+          line: loc.lineNumber,
+        });
+      } else if (m.type() === "warning" && /phaser|babylon|webgl|texture|audio|deprecat/i.test(m.text())) {
+        report.issues.push({
+          type: "console",
+          severity: "warning",
+          message: m.text().slice(0, 300),
+          file,
+          line: loc.lineNumber,
+        });
+      }
     });
-    page.on("pageerror", (e) => report.pageErrors.push(String(e.message).slice(0, 300)));
+    page.on("pageerror", (e) => {
+      report.pageErrors.push(String(e.message).slice(0, 300));
+      consoleLog.push(`[pageerror] ${e.message}\n${e.stack ?? ""}`);
+      const frame = (e.stack ?? "").split("\n").find((l) => l.includes(url));
+      const m = frame?.match(/([^\/\s]+\.js):(\d+)/);
+      report.issues.push({
+        type: "runtime",
+        severity: "fatal",
+        message: String(e.message).slice(0, 400),
+        stack: (e.stack ?? "").replace(new RegExp(url.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"), "/").slice(0, 1200),
+        file: m?.[1],
+        line: m ? Number(m[2]) : undefined,
+      });
+    });
+    page.on("requestfailed", (req) => {
+      if (!req.url().startsWith(url)) return; // external blocks already recorded
+      report.issues.push({
+        type: "resource",
+        severity: "error",
+        message: `resource failed to load: ${req.url().replace(url, "/")} (${req.failure()?.errorText ?? "unknown"})`,
+      });
+    });
+    page.on("response", (res) => {
+      if (res.url().startsWith(url) && res.status() >= 400) {
+        report.issues.push({
+          type: "resource",
+          severity: "error",
+          message: `resource returned HTTP ${res.status()}: ${res.url().replace(url, "/")}`,
+        });
+      }
+    });
 
     await page.goto(url, { waitUntil: "load", timeout: 30_000 });
     await page.waitForTimeout(2500); // let the engine boot
@@ -177,74 +299,155 @@ export async function playtest(ws: Workspace, buildDir: string, jobId: string): 
       return buf;
     };
 
-    const initial = await shot("01-initial");
+    // Engine + canvas verification (infrastructure vs gameplay classification)
+    report.engineLoaded = await page
+      .evaluate(
+        (g) => typeof (window as any)[g] !== "undefined",
+        ws.engine === "babylon" ? "BABYLON" : "Phaser",
+      )
+      .catch(() => false);
+    if (!report.engineLoaded) {
+      report.issues.push({
+        type: "engine",
+        severity: "fatal",
+        message: `${ws.engine === "babylon" ? "BABYLON" : "Phaser"} is not defined after page load — engine script missing/failed (infrastructure, not gameplay)`,
+      });
+    }
+
+    const initial = await shot(`it${iteration}-01-initial`);
     report.canvasPresent = (await page.locator("canvas").count()) > 0;
     report.canvasPaintedRatio = paintedRatio(initial);
+    if (!report.canvasPresent) {
+      report.issues.push({
+        type: report.engineLoaded ? "runtime" : "engine",
+        severity: "fatal",
+        message: "no <canvas> element exists after load — the game never created its rendering surface",
+      });
+    }
 
-    const readHook = () =>
-      page
-        .evaluate(() => {
-          const h = (window as any).__PLAYLAP_TEST__;
-          if (!h) return null;
-          try {
-            return JSON.parse(JSON.stringify(h, (_k, v) => (typeof v === "function" ? undefined : v)));
-          } catch {
-            return { unserializable: true };
-          }
-        })
-        .catch(() => null);
-
-    const before = await readHook();
+    // Test-hook contract (before interaction)
+    const before = await readHook(page);
+    report.testHookBefore = before;
     report.testHook = before;
+    if (!before) {
+      report.issues.push({
+        type: "testHook",
+        severity: "fatal",
+        message:
+          "window.__PLAYLAP_TEST__ is missing — the platform contract requires it (load src/playlap-test.js and call __PLAYLAP_TEST_SET__ from game code)",
+      });
+    } else {
+      report.missingHookFields = TEST_HOOK_REQUIRED_FIELDS.filter((f) => !(f in before));
+      // Liveness: the scaffold helper's defaults satisfy field presence, so a
+      // hook still exactly at defaults means game code never updated it.
+      const defaults = JSON.stringify({ scene: null, state: "boot", score: 0, gameOver: false, paused: false });
+      if (JSON.stringify(before) === defaults) {
+        report.issues.push({
+          type: "testHook",
+          severity: "error",
+          message:
+            "__PLAYLAP_TEST__ is still at scaffold defaults — game code never called __PLAYLAP_TEST_SET__; wire it into scene/state/score changes",
+        });
+      }
+      if (report.missingHookFields.length > 0) {
+        report.issues.push({
+          type: "testHook",
+          severity: "error",
+          message: `__PLAYLAP_TEST__ is missing required fields: ${report.missingHookFields.join(", ")}`,
+          evidence: JSON.stringify(before).slice(0, 300),
+        });
+      }
+    }
 
-    // Simulated gameplay: taps across the play area + arrow keys.
+    // ---- interaction testing ----
+    // Discover real interactive elements instead of blind taps only.
     const vp = page.viewportSize()!;
-    for (const [fx, fy] of [
-      [0.5, 0.6],
-      [0.5, 0.5],
-      [0.3, 0.7],
-      [0.7, 0.7],
-      [0.5, 0.6],
+    const buttons = page.locator("button, [role='button'], a[onclick], .btn, [data-action]");
+    const buttonCount = Math.min(await buttons.count().catch(() => 0), 4);
+    for (let i = 0; i < buttonCount; i++) {
+      await buttons.nth(i).tap({ timeout: 1500 }).catch(() => undefined);
+      await page.waitForTimeout(500);
+    }
+    // Canvas-focused taps (center + corners of the canvas box when available).
+    const canvasBox = await page.locator("canvas").first().boundingBox().catch(() => null);
+    const cx = canvasBox ? canvasBox.x + canvasBox.width / 2 : vp.width / 2;
+    const cy = canvasBox ? canvasBox.y + canvasBox.height / 2 : vp.height / 2;
+    for (const [dx, dy] of [
+      [0, 0],
+      [0, 0.15],
+      [-0.2, 0.2],
+      [0.2, 0.2],
+      [0, 0],
     ]) {
-      await page.touchscreen.tap(vp.width * fx, vp.height * fy).catch(() => undefined);
+      await page.touchscreen
+        .tap(cx + dx * (canvasBox?.width ?? vp.width), cy + dy * (canvasBox?.height ?? vp.height))
+        .catch(() => undefined);
       await page.waitForTimeout(700);
     }
-    for (const key of ["ArrowRight", "ArrowUp", "Space"]) {
+    for (const key of ["ArrowRight", "ArrowLeft", "ArrowUp", "Space"]) {
       await page.keyboard.press(key).catch(() => undefined);
       await page.waitForTimeout(300);
     }
     // Let timed gameplay (bite windows etc.) progress, tapping occasionally.
     for (let i = 0; i < 6; i++) {
       await page.waitForTimeout(1000);
-      await page.touchscreen.tap(vp.width * 0.5, vp.height * 0.6).catch(() => undefined);
+      await page.touchscreen.tap(cx, cy).catch(() => undefined);
     }
-    await shot("02-gameplay");
+    const gameplayShot = await shot(`it${iteration}-02-gameplay`);
 
-    const after = await readHook();
+    const after = await readHook(page);
     if (after) report.testHook = after;
-    report.interactionEffect = JSON.stringify(before) !== JSON.stringify(after) && after !== null;
+    report.changedHookFields = diffHook(before, after);
+    // Meaningful change: any hook field changed, or the screen visibly changed
+    // (paint density delta) when a hook exists but tracks little state.
+    const paintDelta = Math.abs(paintedRatio(gameplayShot) - report.canvasPaintedRatio);
+    report.interactionEffect = (after !== null && report.changedHookFields.length > 0) || (after !== null && paintDelta > 0.08);
+    if (!report.interactionEffect) {
+      report.issues.push({
+        type: "interaction",
+        severity: "error",
+        message: "no meaningful state change after simulated input (buttons, canvas taps, keys)",
+        evidence: `hook before: ${JSON.stringify(before).slice(0, 250)} | hook after: ${JSON.stringify(after).slice(0, 250)} | paintDelta=${paintDelta.toFixed(3)}`,
+      });
+    }
     await page.waitForTimeout(500);
-    await shot("03-state");
+    await shot(`it${iteration}-03-state`);
 
-    if (!report.canvasPresent) report.notes.push("No <canvas> element found — engine likely failed to boot.");
-    if (!report.testHook) report.notes.push("window.__PLAYLAP_TEST__ hook missing.");
-    if (!report.interactionEffect) report.notes.push("Game state did not change after simulated input.");
-    if (report.canvasPaintedRatio < 0.05) report.notes.push("Screen appears blank (very low paint density).");
+    if (report.canvasPaintedRatio < 0.05) {
+      report.issues.push({
+        type: "visual",
+        severity: "fatal",
+        message: `screen appears blank (paint density ${report.canvasPaintedRatio.toFixed(2)}) — nothing is rendering`,
+      });
+    }
 
+    report.hookContractOk = report.testHook !== null && report.missingHookFields.length === 0;
+    report.notes = report.issues.filter((i) => i.severity !== "warning").map((i) => `${i.type}: ${i.message.slice(0, 140)}`);
     report.ok =
-      report.pageErrors.length === 0 &&
+      report.issues.filter((i) => i.severity === "fatal").length === 0 &&
       report.consoleErrors.length === 0 &&
+      report.pageErrors.length === 0 &&
+      report.engineLoaded &&
       report.canvasPresent &&
-      report.testHook !== null &&
+      report.hookContractOk &&
       report.canvasPaintedRatio >= 0.05 &&
-      report.interactionEffect;
+      report.interactionEffect &&
+      report.blockedExternal.length === 0;
     await context.close();
   } catch (err) {
     report.pageErrors.push(`QA harness error: ${String((err as Error).message)}`);
+    report.issues.push({ type: "runtime", severity: "fatal", message: `QA harness error: ${String((err as Error).message).slice(0, 300)}` });
     log("error", "playtest crashed", { jobId, error: String(err) });
   } finally {
     await browser?.close().catch(() => undefined);
     close();
+  }
+  // Persist QA evidence for later debugging (structured report + console log).
+  try {
+    fs.writeFileSync(path.join(qaDir, `qa-iteration-${iteration}.json`), JSON.stringify(report, null, 2));
+    fs.writeFileSync(path.join(qaDir, `console-iteration-${iteration}.log`), consoleLog.join("\n"));
+  } catch (err) {
+    log("warn", "failed to persist QA artifacts", { jobId, error: String(err) });
   }
   return report;
 }
