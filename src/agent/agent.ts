@@ -11,11 +11,13 @@ import { config } from "../config.js";
 import { log, detachJobLogFile } from "../logger.js";
 import { Job, JobResult, Stage, pushEvent, updateJob } from "../jobs.js";
 import { ModelProvider, ChatMessage } from "../model/provider.js";
-import { Workspace, createWorkspace, checkpoint, enforceSizeLimit } from "./workspace.js";
+import { Workspace, createWorkspace, checkpoint, enforceSizeLimit, currentCommit, rollbackTo } from "./workspace.js";
 import { TOOL_DEFS, executeTool } from "./tools.js";
-import { PERSONA, planningPrompt, codingPrompt, repairPrompt } from "./skills.js";
+import { PERSONA, planningPrompt, codingPrompt, repairPrompt, RepairContext } from "./skills.js";
 import { playtest, PlaytestReport } from "./playtest.js";
 import { evaluateQuality } from "./quality.js";
+import { restoreInfrastructure, checkInfrastructure, staticEngineChecks } from "./staticChecks.js";
+import { QAIssue, fatalCount, issueSignature, formatIssues } from "./qaTypes.js";
 
 const MAX_AGENT_TURNS = 60;
 
@@ -70,13 +72,24 @@ export async function runJob(provider: ModelProvider, job: Job, isCancelled: () 
     await toolLoop(provider, ws, job, `${PERSONA}\n${codingPrompt(job.dimension, job.prompt, plan)}`, guard);
     checkpoint(ws, "coding complete");
 
-    // ---- build / run / playtest / repair loop ----
+    // ---- build / static-check / run / playtest / repair loop ----
+    // Observe → diagnose → edit → syntax check → build → playtest → compare.
+    // Regressions are auto-reverted to the last known-good checkpoint, and
+    // repeated failure signatures force the model to re-diagnose.
     let report: PlaytestReport | null = null;
     let buildError: string | null = null;
+    let lastGoodReport: PlaytestReport | null = null;
+    let lastGoodCommit: string | null = null;
+    const attemptedSignatures: string[] = [];
+    const attemptHistory: string[] = [];
+    let rolledBack = false;
     while (true) {
       guard();
       buildIterations += 1;
       setStage("building", 40, `Build iteration ${buildIterations}`);
+      // Protect required bootstrap infrastructure deterministically — never
+      // burn a model repair on a deleted vendor file or missing hook helper.
+      for (const n of restoreInfrastructure(ws)) pushEvent(job, "building", `infrastructure: ${n}`);
       buildError = buildGame(ws);
       if (buildError) {
         setStage("repairing", 45, `Build failed: ${buildError.slice(0, 120)}`);
@@ -84,35 +97,65 @@ export async function runJob(provider: ModelProvider, job: Job, isCancelled: () 
           throw new Error(`Build failed after ${buildIterations} iterations: ${buildError}`);
         }
         repairIterations += 1;
-        await toolLoop(provider, ws, job, `${PERSONA}\n${repairPrompt(`Build error:\n${buildError}`)}`, guard);
+        await toolLoop(
+          provider,
+          ws,
+          job,
+          `${PERSONA}\n${repairPrompt(`Build error:\n${buildError}`, { previousAttempts: attemptHistory })}`,
+          guard,
+        );
         checkpoint(ws, `repair after build failure #${repairIterations}`);
         continue;
       }
       checkpoint(ws, `build ok #${buildIterations}`);
 
+      // Deterministic static checks (infrastructure + engine-specific smells)
+      // run before spending a browser session; their findings are appended to
+      // the QA evidence, never a replacement for runtime QA.
+      const staticIssues: QAIssue[] = [...checkInfrastructure(ws), ...staticEngineChecks(ws)];
+
       guard();
       setStage("running", 55, "Starting the game in a sandboxed local server");
       setStage("playtesting", 65, "Playing the game in headless Chromium");
-      report = await playtest(ws, path.join(ws.root, "build"), job.jobId);
+      report = await playtest(ws, path.join(ws.root, "build"), job.jobId, buildIterations);
+      report.issues.push(...staticIssues);
+      // Static/infrastructure findings are part of the verdict, not advisory.
+      if (staticIssues.some((i) => i.severity !== "warning")) report.ok = false;
       pushEvent(
         job,
         "playtesting",
-        `QA: canvas=${report.canvasPresent} paint=${report.canvasPaintedRatio.toFixed(2)} hook=${report.testHook ? "yes" : "no"} errors=${report.consoleErrors.length + report.pageErrors.length}`,
+        `QA: engine=${report.engineLoaded} canvas=${report.canvasPresent} paint=${report.canvasPaintedRatio.toFixed(2)} hook=${report.hookContractOk ? "ok" : report.testHook ? "incomplete" : "missing"} fatal=${fatalCount(report.issues)} errors=${report.consoleErrors.length + report.pageErrors.length}`,
       );
-      if (report.ok) break;
 
+      // Regression protection: if this iteration lost the engine/canvas/hook
+      // or added fatal errors vs the last good state, revert and retry
+      // differently instead of keeping the damage.
+      rolledBack = false;
+      if (lastGoodReport && lastGoodCommit && isRegression(lastGoodReport, report)) {
+        pushEvent(job, "repairing", `regression detected — reverting to last good checkpoint`);
+        rollbackTo(ws, lastGoodCommit);
+        rolledBack = true;
+        report = lastGoodReport;
+      } else if (!lastGoodReport || !isWorse(lastGoodReport, report)) {
+        lastGoodReport = report;
+        lastGoodCommit = currentCommit(ws);
+      }
+
+      if (report.ok) break;
       if (repairIterations >= config.maxRepairIterations) {
         // keep the evidence and let the quality gate decide below
         break;
       }
       repairIterations += 1;
-      setStage("repairing", 70, `Repair iteration ${repairIterations}: ${report.notes.join("; ").slice(0, 140) || "console errors"}`);
-      const qaText = [
-        ...report.pageErrors.map((e) => `Page error: ${e}`),
-        ...report.consoleErrors.map((e) => `Console error: ${e}`),
-        ...report.notes,
-      ].join("\n");
-      await toolLoop(provider, ws, job, `${PERSONA}\n${repairPrompt(qaText || "Unknown QA failure")}`, guard);
+      const sig = issueSignature(report.issues);
+      const repeatedFailure = attemptedSignatures.includes(sig);
+      attemptedSignatures.push(sig);
+      const ctx: RepairContext = { repeatedFailure, rolledBack, previousAttempts: attemptHistory };
+      setStage("repairing", 70, `Repair iteration ${repairIterations}: ${report.notes.join("; ").slice(0, 140) || "QA issues"}`);
+      const evidence = formatIssues(report.issues);
+      const summary = await toolLoop(provider, ws, job, `${PERSONA}\n${repairPrompt(evidence || "Unknown QA failure", ctx)}`, guard);
+      attemptHistory.push(summary || report.notes[0]?.slice(0, 120) || `attempt ${repairIterations}`);
+      if (attemptHistory.length > 6) attemptHistory.shift();
       checkpoint(ws, `repair #${repairIterations}`);
     }
 
@@ -166,25 +209,55 @@ export async function runJob(provider: ModelProvider, job: Job, isCancelled: () 
   }
 }
 
-/** Generic model tool-calling loop for a phase. */
+/** Regression: the new iteration lost working infrastructure or added fatal failures. */
+function isRegression(prev: PlaytestReport, next: PlaytestReport): boolean {
+  if (prev.ok && !next.ok) return true;
+  if (prev.engineLoaded && !next.engineLoaded) return true;
+  if (prev.canvasPresent && !next.canvasPresent) return true;
+  if (prev.testHook !== null && next.testHook === null) return true;
+  return fatalCount(next.issues) > fatalCount(prev.issues);
+}
+
+/** Strictly worse (used to decide whether to advance the known-good checkpoint). */
+function isWorse(prev: PlaytestReport, next: PlaytestReport): boolean {
+  return isRegression(prev, next);
+}
+
+/**
+ * Generic model tool-calling loop for a phase. Returns the model's `done`
+ * summary (root-cause description during repair) or an empty string.
+ */
 async function toolLoop(
   provider: ModelProvider,
   ws: Workspace,
   job: Job,
   systemPrompt: string,
   guard: () => void,
-): Promise<void> {
+): Promise<string> {
   const messages: ChatMessage[] = [
     { role: "system", content: `${systemPrompt}\ndimension: ${job.dimension}` },
     { role: "user", content: job.prompt },
   ];
+  let edits = 0;
   for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
     guard();
     const res = await provider.chat(messages, TOOL_DEFS);
     messages.push({ role: "assistant", content: res.content, toolCalls: res.toolCalls });
-    if (res.toolCalls.length === 0) return; // model finished with a plain message
+    if (res.toolCalls.length === 0) return res.content.slice(0, 200); // model finished with a plain message
     for (const call of res.toolCalls) {
-      if (call.name === "done") return;
+      if (call.name === "done") {
+        // A repair phase must not "finish" without touching anything.
+        if (/PHASE: repairing/.test(systemPrompt) && edits === 0 && turn < MAX_AGENT_TURNS - 1) {
+          messages.push({
+            role: "tool",
+            content: "REJECTED: you called done without editing any file. Read the evidence, inspect the offending files, and make a fix first.",
+            toolCallId: call.id,
+          });
+          continue;
+        }
+        return String(call.arguments.summary ?? "").slice(0, 200);
+      }
+      if (call.name === "write_file" || call.name === "edit_file") edits += 1;
       let output: string;
       try {
         output = await executeTool(ws, call.name, call.arguments);
