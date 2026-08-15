@@ -14,7 +14,7 @@ import { config } from "../config.js";
 import { log } from "../logger.js";
 import { Workspace } from "./workspace.js";
 import { QAIssue, TEST_HOOK_REQUIRED_FIELDS } from "./qaTypes.js";
-import { findLocalAssetReferences, assetExistsOnDisk } from "./staticChecks.js";
+import { findLocalAssetReferences, assetExistsOnDisk, summarizeSceneConstruction } from "./staticChecks.js";
 
 export interface PlaytestReport {
   ok: boolean;
@@ -225,6 +225,51 @@ export function missingResourceIssue(buildDir: string, requestedUrl: string, rea
     message: `resource ${reason}: ${requestedUrl}${existsOnDisk ? "" : strategies}`,
     evidence: JSON.stringify(detail, null, 2),
   };
+}
+
+/** Scene APIs whose absence on `this` means the object is not a live Phaser.Scene. */
+const UNDEF_SCENE_API_RE =
+  /Cannot read properties of undefined \(reading '(add|load|physics|anims|tweens|time|input|cameras|sound|textures|make|graphics|image|sprite|text)'\)/;
+
+/**
+ * For fatal runtime issues that look like a dead Scene API (`this.add` is
+ * undefined), append deterministic SCENE CONSTRUCTION facts from the source
+ * file: class declarations (extends what?), super() usage, Phaser.Game
+ * registration. Exported for tests.
+ */
+export function attachConstructionEvidence(issues: QAIssue[], buildDir: string): void {
+  const base = path.resolve(buildDir);
+  for (const issue of issues) {
+    if (issue.type !== "runtime" || !issue.file || !UNDEF_SCENE_API_RE.test(issue.message)) continue;
+    try {
+      const rel = issue.file.replace(/^\/+/, "");
+      const p = path.resolve(base, rel);
+      if (!p.startsWith(base + path.sep)) continue;
+      const inside = path.relative(base, p);
+      if (!/^(src|assets|public)[\\/]/.test(inside)) continue;
+      if (!fs.existsSync(p)) continue;
+      // Registration may live in a different module — search all built src.
+      const srcDir = path.join(base, "src");
+      let registryCode = "";
+      try {
+        if (fs.existsSync(srcDir)) {
+          for (const f of fs.readdirSync(srcDir, { recursive: true, encoding: "utf8" })) {
+            if (String(f).endsWith(".js")) registryCode += fs.readFileSync(path.join(srcDir, String(f)), "utf8") + "\n";
+          }
+        }
+      } catch {
+        /* fall back to single file */
+      }
+      const code = fs.readFileSync(p, "utf8");
+      const facts = summarizeSceneConstruction(rel, code, registryCode || code);
+      if (!facts.length) continue;
+      issue.evidence =
+        `${issue.evidence ?? ""}\nSCENE CONSTRUCTION FACTS (check these BEFORE moving code between lifecycle methods — if the class is not a real, registered Phaser.Scene, no lifecycle move can ever fix this):\n` +
+        facts.map((f) => `- ${f}`).join("\n");
+    } catch {
+      /* best-effort */
+    }
+  }
 }
 
 export async function playtest(ws: Workspace, buildDir: string, jobId: string, iteration = 1): Promise<PlaytestReport> {
@@ -511,6 +556,12 @@ export async function playtest(ws: Workspace, buildDir: string, jobId: string, i
   // Attach the exact offending source lines to every located issue so the
   // repair model never has to guess from an exception message alone.
   attachSourceEvidence(report.issues, buildDir);
+  // "undefined (reading 'add'/'graphics'/...)" inside a lifecycle method is
+  // very often a CONSTRUCTION bug (class not extending Phaser.Scene, missing
+  // super(), manual `new MyGame()` instead of Phaser.Game scene config) —
+  // attach deterministic construction facts so the model inspects the class
+  // declaration instead of endlessly moving code between lifecycle methods.
+  attachConstructionEvidence(report.issues, buildDir);
   // Persist QA evidence for later debugging (structured report + console log).
   try {
     fs.writeFileSync(path.join(qaDir, `qa-iteration-${iteration}.json`), JSON.stringify(report, null, 2));
