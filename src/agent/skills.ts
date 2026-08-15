@@ -46,6 +46,8 @@ export interface RepairContext {
   previousAttempts?: string[];
   /** Unified diff of what the previous repair actually changed. */
   previousDiff?: string;
+  /** The previous repair was far larger than the evidence justified. */
+  scopeWarning?: string;
 }
 
 export function repairPrompt(report: string, ctx: RepairContext = {}): string {
@@ -63,6 +65,11 @@ export function repairPrompt(report: string, ctx: RepairContext = {}): string {
   if (ctx.previousAttempts?.length) {
     extra.push(`Previous repair attempts (do not repeat them):\n${ctx.previousAttempts.map((a, i) => `${i + 1}. ${a}`).join("\n")}`);
   }
+  if (ctx.scopeWarning) {
+    extra.push(
+      `IMPORTANT — REPAIR SCOPE: ${ctx.scopeWarning}\nThis time make a LOCALIZED fix: touch only the file(s)/line(s) named in the evidence, change as few lines as possible, and do not restructure unrelated systems.`,
+    );
+  }
   if (ctx.previousDiff) {
     extra.push(`Exact changes made by the PREVIOUS repair (it did not fix the problem — do not repeat this approach):\n\`\`\`diff\n${ctx.previousDiff}\n\`\`\``);
   }
@@ -70,7 +77,7 @@ export function repairPrompt(report: string, ctx: RepairContext = {}): string {
 The game failed QA. Work root-cause first: read the evidence below (it includes files, lines, stacks, and the exact offending source lines), open the offending files, state the root cause to yourself, then make the smallest correct fix. Re-check syntax with node --check after editing. When fixed, call done with a one-line summary of the root cause you fixed.
 Diagnosis guide:
 - If the evidence has a ROOT-CAUSE section, fix ONLY those first. Items marked LIKELY DOWNSTREAM (no interaction, stale hook, blank screen) are usually consequences of the fatal error — do not redesign them.
-- "Cannot read properties of undefined (reading 'graphics'/'image'/'add'/...)" on a Scene API almost always means "this" is not the Scene at that point: a plain function() callback, code running in the wrong lifecycle phase, or scene systems used before initialization. Fix the context/lifecycle (arrow function, .bind(this), callbackScope: this, move code from preload() to create()) — NEVER hide the error with try/catch or optional chaining.
+- "Cannot read properties of undefined (reading 'graphics'/'image'/'add'/...)" on a Scene API has exactly TWO causes. FIRST check construction: read the class declaration — does it literally say "extends Phaser.Scene", does its constructor call super(...), and is it registered via new Phaser.Game({ scene: [TheClass] })? A plain class that merely DEFINES preload()/create() but is instantiated with "new MyGame()" is NOT a Scene — this.add/this.load do not exist on it in ANY method, and no amount of moving code between preload/create can ever fix it; you must fix the class declaration + registration. Only when construction is verified correct is it a context/timing problem: a plain function() callback losing "this", or the wrong lifecycle phase — fix with arrow function/.bind(this)/callbackScope: this or the correct phase. If evidence shows the SAME undefined-Scene-API error already survived a lifecycle move, construction IS the root cause. NEVER hide the error with try/catch or optional chaining.
 - preload() is only for this.load.* and texture generation; display objects/physics/input belong in create(); this.load.* does nothing in create()/update().
 - MISSING LOCAL ASSET (a "resource" issue with existsOnDisk: false): the evidence lists every referencedBy file:line — go straight there, do not search. Choose EXACTLY ONE strategy: (A) create the missing asset locally/procedurally, (B) change the reference to a file that ALREADY EXISTS on disk (verify with list_files first), or (C) remove the dependency and draw it with procedural Phaser graphics. NEVER replace it with another filename that does not exist — that fails the same deterministic check again and wastes a repair.
 Rules:
