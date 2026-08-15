@@ -11,6 +11,7 @@ import { config } from "../config.js";
 import { log, detachJobLogFile } from "../logger.js";
 import { Job, JobResult, Stage, pushEvent, updateJob } from "../jobs.js";
 import { ModelProvider, ChatMessage } from "../model/provider.js";
+import { classifyModelError } from "../model/retry.js";
 import {
   Workspace,
   createWorkspace,
@@ -26,7 +27,7 @@ import { PERSONA, planningPrompt, codingPrompt, repairPrompt, syntaxFixPrompt, R
 import { playtest, PlaytestReport } from "./playtest.js";
 import { evaluateQuality } from "./quality.js";
 import { restoreInfrastructure, checkInfrastructure, staticEngineChecks } from "./staticChecks.js";
-import { QAIssue, fatalCount, issueSignature, formatIssues } from "./qaTypes.js";
+import { QAIssue, fatalCount, issueSignature, formatIssues, analyzeRepairScope } from "./qaTypes.js";
 
 const MAX_AGENT_TURNS = 60;
 /**
@@ -70,12 +71,16 @@ export async function runJob(provider: ModelProvider, job: Job, isCancelled: () 
     guard();
     setStage("planning", 5, "Creating workspace and game design document");
     ws = createWorkspace(job.jobId, engine);
-    const planRes = await provider.chat(
+    const planRes = await chatWithProtocolRetry(
+      provider,
+      ws,
+      "planning",
       [
         { role: "system", content: `${PERSONA}\n${planningPrompt(job.dimension, job.prompt, job.language)}` },
         { role: "user", content: job.prompt },
       ],
       [],
+      guard,
     );
     const plan = planRes.content.trim() || `# Game Design\n${job.prompt}`;
     fs.writeFileSync(path.join(ws.root, "game-design.md"), plan);
@@ -89,7 +94,7 @@ export async function runJob(provider: ModelProvider, job: Job, isCancelled: () 
     // cannot restore valid JS, revert to the clean scaffold and retry the
     // whole coding phase once before giving up.
     for (let codingAttempt = 1; ; codingAttempt++) {
-      await toolLoop(provider, ws, job, `${PERSONA}\n${codingPrompt(job.dimension, job.prompt, plan)}`, guard);
+      await toolLoop(provider, ws, job, `${PERSONA}\n${codingPrompt(job.dimension, job.prompt, plan)}`, guard, `coding-${codingAttempt}`);
       if (await syntaxGate(provider, ws, job, guard, setStage)) break;
       if (codingAttempt >= 2) {
         throw new Error("Coding phase produced invalid JavaScript that could not be repaired.");
@@ -112,6 +117,8 @@ export async function runJob(provider: ModelProvider, job: Job, isCancelled: () 
     // Diff of what the previous repair changed, snapshotted BEFORE any
     // rollback (after a revert, recomputing the diff would yield nothing).
     let lastRepairDiff: string | null = null;
+    // Deterministic scope complaint about the PREVIOUS repair (oversized rewrite).
+    let lastScopeWarning: string | null = null;
     let rolledBack = false;
     // Hard cap on total loop passes so separated budgets can never spin forever.
     const maxLoopPasses = config.maxBuildIterations + config.maxRepairIterations + 4;
@@ -195,7 +202,9 @@ export async function runJob(provider: ModelProvider, job: Job, isCancelled: () 
         rolledBack,
         previousAttempts: attemptHistory,
         previousDiff: repeatedFailure && lastRepairDiff ? lastRepairDiff : undefined,
+        scopeWarning: lastScopeWarning ?? undefined,
       };
+      lastScopeWarning = null;
       setStage("repairing", 70, `Repair iteration ${repairIterations}: ${report.notes.join("; ").slice(0, 140) || "QA issues"}`);
       const evidence = formatIssues(report.issues);
       const preRepairCommit = currentCommit(ws);
@@ -203,7 +212,7 @@ export async function runJob(provider: ModelProvider, job: Job, isCancelled: () 
       // Forensics: persist the EXACT model input for this repair. artifacts/
       // is git-ignored, so no later rollback can erase it.
       persistQaArtifact(ws, `repair-input-iteration-${repairIterations}.txt`, fullRepairPrompt);
-      const summary = await toolLoop(provider, ws, job, fullRepairPrompt, guard);
+      const summary = await toolLoop(provider, ws, job, fullRepairPrompt, guard, `repair-${repairIterations}`);
       // A repair is NEVER accepted until every JS file parses. The syntax
       // micro-loop has its own budget; if the model can't restore valid
       // syntax, the whole repair is reverted (valid code must never be
@@ -221,6 +230,22 @@ export async function runJob(provider: ModelProvider, job: Job, isCancelled: () 
           `repair-diff-iteration-${repairIterations}.patch`,
           (d || "(repair produced no changes)") + (syntaxOk ? "" : "\n\n# NOTE: this repair left unfixable syntax errors and was reverted."),
         );
+        // Deterministic scope check: a pinpointed failure (file:line) answered
+        // by a huge multi-system rewrite is prime regression material. Never a
+        // rejection by itself — the next repair prompt demands a localized fix
+        // and the diff itself becomes evidence.
+        if (d) {
+          const scope = analyzeRepairScope(d, report.issues);
+          persistQaArtifact(ws, `repair-scope-iteration-${repairIterations}.json`, JSON.stringify(scope, null, 2));
+          if (scope.oversized) {
+            lastScopeWarning =
+              `your previous repair changed ${scope.totalChangedLines} lines across ${scope.changedFiles.map((f) => f.file).join(", ")} ` +
+              `while the evidence pointed only at ${scope.evidenceFiles.join(", ") || "specific lines"}` +
+              (scope.unrelatedFiles.length ? ` (files changed WITHOUT any evidence: ${scope.unrelatedFiles.join(", ")})` : "") +
+              ` — large unrelated rewrites are how regressions happen.`;
+            pushEvent(job, "repairing", `repair #${repairIterations} was much larger than the evidence justified (${scope.totalChangedLines} changed lines)`);
+          }
+        }
       }
       if (!syntaxOk) {
         if (preRepairCommit) {
@@ -293,6 +318,65 @@ export async function runJob(provider: ModelProvider, job: Job, isCancelled: () 
  * Exported for tests.
  */
 /**
+ * Provider call with a SEPARATE model/protocol retry budget. A malformed
+ * tool-call response (e.g. Ollama HTTP 500 "XML syntax error"), a provider
+ * 5xx, or a transport timeout is not a generated-game failure: it is
+ * retried here without consuming QA repair or syntax budgets. Safe by
+ * construction: provider.chat() throws BEFORE any tool executes, so a
+ * failed attempt cannot modify or checkpoint the workspace — tools of a
+ * turn only run after its response parsed successfully.
+ * Every failed attempt is persisted as artifacts/qa/model-error-<tag>-attempt-N.json.
+ */
+export async function chatWithProtocolRetry(
+  provider: ModelProvider,
+  ws: Workspace,
+  tag: string,
+  messages: ChatMessage[],
+  tools = TOOL_DEFS,
+  guard: () => void = () => undefined,
+): Promise<Awaited<ReturnType<ModelProvider["chat"]>>> {
+  const maxRetries = config.modelProtocolRetries;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      guard(); // job deadline/cancellation applies to every retry attempt too
+      return await provider.chat(messages, tools);
+    } catch (err) {
+      const message = String((err as Error).message ?? err);
+      const classification = classifyModelError(message);
+      persistQaArtifact(
+        ws,
+        `model-error-${tag}-attempt-${attempt}.json`,
+        JSON.stringify(
+          {
+            phase: tag,
+            attempt,
+            maxRetries,
+            provider: provider.name,
+            model: (provider as { modelName?: string }).modelName ?? null,
+            httpStatus: Number(message.match(/HTTP (\d{3})/)?.[1]) || null,
+            classification,
+            error: message.slice(0, 2000),
+            workspaceRolledBack: false,
+            note: "provider.chat() failed before any tool of this turn executed — workspace unchanged, nothing checkpointed",
+            at: new Date().toISOString(),
+          },
+          null,
+          2,
+        ),
+      );
+      log("warn", "model protocol failure", { jobId: ws.jobId, tag, attempt, classification, error: message.slice(0, 200) });
+      if (classification === "fatal" || attempt > maxRetries) {
+        throw new Error(
+          `Model provider failed (${classification}${classification === "retryable" ? `, ${attempt} attempts` : ""}): ${message.slice(0, 300)} — evidence in artifacts/qa/model-error-${tag}-attempt-*.json`,
+        );
+      }
+      guard(); // never sleep past a cancelled/expired job
+      await new Promise((r) => setTimeout(r, Math.min(1500 * attempt, 8000)));
+    }
+  }
+}
+
+/**
  * Append-only forensic evidence under artifacts/qa/. The directory is
  * git-ignored, so no checkpoint/rollback can ever delete or rewrite it —
  * what the repair model saw is exactly what remains after the job ends.
@@ -363,7 +447,7 @@ async function syntaxGate(
       return false;
     }
     setStage("repairing", 68, `Syntax fix round ${attempt + 1}: ${err.split("\n")[0].slice(0, 120)}`);
-    await toolLoop(provider, ws, job, `${PERSONA}\n${syntaxFixPrompt(err)}`, guard);
+    await toolLoop(provider, ws, job, `${PERSONA}\n${syntaxFixPrompt(err)}`, guard, `syntaxfix-${attempt + 1}`);
   }
   return false;
 }
@@ -392,6 +476,7 @@ async function toolLoop(
   job: Job,
   systemPrompt: string,
   guard: () => void,
+  tag = "phase",
 ): Promise<string> {
   const messages: ChatMessage[] = [
     { role: "system", content: `${systemPrompt}\ndimension: ${job.dimension}` },
@@ -400,7 +485,7 @@ async function toolLoop(
   let edits = 0;
   for (let turn = 0; turn < MAX_AGENT_TURNS; turn++) {
     guard();
-    const res = await provider.chat(messages, TOOL_DEFS);
+    const res = await chatWithProtocolRetry(provider, ws, `${tag}-turn-${turn + 1}`, messages, TOOL_DEFS, guard);
     messages.push({ role: "assistant", content: res.content, toolCalls: res.toolCalls });
     if (res.toolCalls.length === 0) return res.content.slice(0, 200); // model finished with a plain message
     for (const call of res.toolCalls) {
