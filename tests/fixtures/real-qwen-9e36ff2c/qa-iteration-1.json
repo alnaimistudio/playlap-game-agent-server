@@ -1,0 +1,69 @@
+{
+  "ok": false,
+  "iteration": 1,
+  "engineLoaded": true,
+  "canvasPresent": true,
+  "canvasPaintedRatio": 0.3139906872957865,
+  "testHook": {
+    "scene": null,
+    "state": "boot",
+    "score": 0,
+    "gameOver": false,
+    "paused": false
+  },
+  "testHookBefore": {
+    "scene": null,
+    "state": "boot",
+    "score": 0,
+    "gameOver": false,
+    "paused": false
+  },
+  "hookContractOk": true,
+  "missingHookFields": [],
+  "interactionEffect": false,
+  "changedHookFields": [],
+  "blockedExternal": [],
+  "issues": [
+    {
+      "type": "runtime",
+      "severity": "fatal",
+      "message": "Cannot read properties of undefined (reading 'graphics')",
+      "stack": "TypeError: Cannot read properties of undefined (reading 'graphics')\n    at CatchTheCatchGame.createFishingRodTexture (/src/game.js:141:35)\n    at CatchTheCatchGame.preload (/src/game.js:117:14)\n    at initialize.bootScene (/vendor/phaser.min.js:1:964952)\n    at initialize.start (/vendor/phaser.min.js:1:968814)\n    at initialize.bootQueue (/vendor/phaser.min.js:1:963357)\n    at a.emit (/vendor/phaser.min.js:1:1954)\n    at initialize.texturesReady (/vendor/phaser.min.js:1:75511)\n    at a.emit (/vendor/phaser.min.js:1:1954)\n    at initialize.updatePending (/vendor/phaser.min.js:1:1048880)\n    at a.emit (/vendor/phaser.min.js:1:1601)",
+      "file": "src/game.js",
+      "line": 141,
+      "evidence": "   138|     \n   139|     createFishingRodTexture() {\n   140|         // Create a simple fishing rod texture using Phaser's graphics API\n>> 141|         const graphics = this.add.graphics({ x: 0, y: 0 });\n   142|         graphics.fillStyle(0x8B4513);\n   143|         graphics.fillRect(0, 0, 50, 10);\n   144|         graphics.fillCircle(0, 0, 10);"
+    },
+    {
+      "type": "console",
+      "severity": "warning",
+      "message": "[.WebGL-0x2d9c01041500]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels",
+      "file": "",
+      "line": 0
+    },
+    {
+      "type": "testHook",
+      "severity": "error",
+      "message": "__PLAYLAP_TEST__ is still at scaffold defaults — game code never called __PLAYLAP_TEST_SET__; wire it into scene/state/score changes"
+    },
+    {
+      "type": "interaction",
+      "severity": "error",
+      "message": "no meaningful state change after simulated input (buttons, canvas taps, keys)",
+      "evidence": "hook before: {\"scene\":null,\"state\":\"boot\",\"score\":0,\"gameOver\":false,\"paused\":false} | hook after: {\"scene\":null,\"state\":\"boot\",\"score\":0,\"gameOver\":false,\"paused\":false} | paintDelta=0.000"
+    }
+  ],
+  "screenshots": [
+    "artifacts/screenshots/it1-01-initial.png",
+    "artifacts/screenshots/it1-02-gameplay.png",
+    "artifacts/screenshots/it1-03-state.png"
+  ],
+  "notes": [
+    "runtime: Cannot read properties of undefined (reading 'graphics')",
+    "testHook: __PLAYLAP_TEST__ is still at scaffold defaults — game code never called __PLAYLAP_TEST_SET__; wire it into scene/state/score changes",
+    "interaction: no meaningful state change after simulated input (buttons, canvas taps, keys)"
+  ],
+  "consoleErrors": [],
+  "pageErrors": [
+    "Cannot read properties of undefined (reading 'graphics')"
+  ]
+}
