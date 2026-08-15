@@ -1,0 +1,63 @@
+{
+  "ok": false,
+  "iteration": 2,
+  "engineLoaded": true,
+  "canvasPresent": true,
+  "canvasPaintedRatio": 0.321447681500962,
+  "testHook": {
+    "scene": "menu",
+    "state": "menu",
+    "score": 0,
+    "gameOver": false,
+    "paused": false
+  },
+  "testHookBefore": {
+    "scene": "menu",
+    "state": "menu",
+    "score": 0,
+    "gameOver": false,
+    "paused": false
+  },
+  "hookContractOk": true,
+  "missingHookFields": [],
+  "interactionEffect": false,
+  "changedHookFields": [],
+  "blockedExternal": [],
+  "issues": [
+    {
+      "type": "runtime",
+      "severity": "fatal",
+      "message": "Cannot read properties of undefined (reading 'graphics')",
+      "stack": "TypeError: Cannot read properties of undefined (reading 'graphics')\n    at CatchTheCatchGame.createFishingRodTexture (/src/game.js:157:35)\n    at CatchTheCatchGame.create (/src/game.js:135:14)\n    at initialize.create (/vendor/phaser.min.js:1:965689)\n    at initialize.loadComplete (/vendor/phaser.min.js:1:965078)\n    at a.emit (/vendor/phaser.min.js:1:1643)\n    at initialize.loadComplete (/vendor/phaser.min.js:1:538099)\n    at initialize.start (/vendor/phaser.min.js:1:536316)\n    at initialize.bootScene (/vendor/phaser.min.js:1:965023)\n    at initialize.start (/vendor/phaser.min.js:1:968814)\n    at initialize.bootQueue (/vendor/phaser.min.js:1:963357)",
+      "file": "src/game.js",
+      "line": 157,
+      "evidence": "   154|     \n   155|     createFishingRodTexture() {\n   156|         // Create a simple fishing rod texture using Phaser's graphics API\n>> 157|         const graphics = this.add.graphics({ x: 0, y: 0 });\n   158|         graphics.fillStyle(0x8B4513);\n   159|         graphics.fillRect(0, 0, 50, 10);\n   160|         graphics.fillCircle(0, 0, 10);"
+    },
+    {
+      "type": "console",
+      "severity": "warning",
+      "message": "[.WebGL-0x3f24014b1c00]GL Driver Message (OpenGL, Performance, GL_CLOSE_PATH_NV, High): GPU stall due to ReadPixels",
+      "file": "",
+      "line": 0
+    },
+    {
+      "type": "interaction",
+      "severity": "error",
+      "message": "no meaningful state change after simulated input (buttons, canvas taps, keys)",
+      "evidence": "hook before: {\"scene\":\"menu\",\"state\":\"menu\",\"score\":0,\"gameOver\":false,\"paused\":false} | hook after: {\"scene\":\"menu\",\"state\":\"menu\",\"score\":0,\"gameOver\":false,\"paused\":false} | paintDelta=0.000"
+    }
+  ],
+  "screenshots": [
+    "artifacts/screenshots/it2-01-initial.png",
+    "artifacts/screenshots/it2-02-gameplay.png",
+    "artifacts/screenshots/it2-03-state.png"
+  ],
+  "notes": [
+    "runtime: Cannot read properties of undefined (reading 'graphics')",
+    "interaction: no meaningful state change after simulated input (buttons, canvas taps, keys)"
+  ],
+  "consoleErrors": [],
+  "pageErrors": [
+    "Cannot read properties of undefined (reading 'graphics')"
+  ]
+}
