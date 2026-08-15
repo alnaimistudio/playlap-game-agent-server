@@ -24,6 +24,9 @@ export const config = {
   modelBaseUrl: str("MODEL_BASE_URL"),
   modelApiKey: str("MODEL_API_KEY"),
   modelMaxTokens: num("MODEL_MAX_TOKENS", 8192),
+  // Provider/protocol retries (malformed tool-call XML, 5xx, timeouts) —
+  // separate from QA repair and syntax budgets.
+  modelProtocolRetries: Math.max(0, num("MODEL_PROTOCOL_RETRIES", 3)),
 
   maxConcurrentJobs: Math.max(1, num("MAX_CONCURRENT_JOBS", 1)),
   maxBuildIterations: Math.max(1, num("MAX_BUILD_ITERATIONS", 3)),
