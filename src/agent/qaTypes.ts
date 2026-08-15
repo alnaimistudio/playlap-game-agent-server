@@ -80,3 +80,52 @@ export function formatIssues(issues: QAIssue[], max = 20): string {
 function sevRank(s: QASeverity): number {
   return s === "fatal" ? 0 : s === "error" ? 1 : 2;
 }
+
+/** Deterministic scope analysis of a repair diff vs the QA evidence it answered. */
+export interface RepairScope {
+  totalChangedLines: number;
+  changedFiles: { file: string; changedLines: number }[];
+  evidenceFiles: string[];
+  /** Changed files that no non-warning issue pointed at. */
+  unrelatedFiles: string[];
+  /** Large rewrite for narrowly-located evidence. */
+  oversized: boolean;
+}
+
+const SCOPE_LINE_BUDGET = 60; // beyond this, a repair for pinpointed evidence is suspicious
+
+/**
+ * Compare what a repair actually changed against where the evidence pointed.
+ * A narrow runtime failure (one file:line) answered by a huge multi-system
+ * rewrite is how regressions happen — flag it deterministically so the next
+ * repair prompt can demand a localized fix. Never rejects the repair by
+ * itself (legitimate large repairs exist); playtest + regression rollback
+ * remain the arbiters.
+ */
+export function analyzeRepairScope(diff: string, issues: QAIssue[]): RepairScope {
+  const changed = new Map<string, number>();
+  let current: string | null = null;
+  for (const line of diff.split("\n")) {
+    const f = line.match(/^diff --git a\/(.+?) b\//);
+    if (f) {
+      current = f[1];
+      if (!changed.has(current)) changed.set(current, 0);
+      continue;
+    }
+    if (current && /^[+-]/.test(line) && !/^(\+\+\+|---)/.test(line)) {
+      changed.set(current, (changed.get(current) ?? 0) + 1);
+    }
+  }
+  const changedFiles = [...changed.entries()].map(([file, changedLines]) => ({ file, changedLines }));
+  const totalChangedLines = changedFiles.reduce((s, f) => s + f.changedLines, 0);
+  const evidenceFiles = [...new Set(issues.filter((i) => i.file && i.severity !== "warning").map((i) => i.file!))];
+  const pinpointed = issues.some((i) => i.file && i.line && i.severity !== "warning");
+  const unrelatedFiles = changedFiles.map((f) => f.file).filter((f) => evidenceFiles.length > 0 && !evidenceFiles.includes(f));
+  return {
+    totalChangedLines,
+    changedFiles,
+    evidenceFiles,
+    unrelatedFiles,
+    oversized: pinpointed && totalChangedLines > SCOPE_LINE_BUDGET,
+  };
+}
