@@ -329,7 +329,12 @@ export function staticEngineChecks(ws: Workspace): QAIssue[] {
   }
 
   if (ws.engine === "phaser") {
-    for (const f of files) issues.push(...phaserLifecycleChecks(rel(f), fs.readFileSync(f, "utf8")));
+    const allCode = files.map((f) => fs.readFileSync(f, "utf8")).join("\n");
+    for (const f of files) {
+      const code = fs.readFileSync(f, "utf8");
+      issues.push(...phaserLifecycleChecks(rel(f), code));
+      issues.push(...phaserSceneConstructionChecks(rel(f), code, allCode));
+    }
   }
 
   if (!hookSeen) {
@@ -344,6 +349,75 @@ export function staticEngineChecks(ws: Workspace): QAIssue[] {
 
 /** Scene-owned API roots that require `this` to actually be the Scene. */
 const SCENE_API = /\bthis\.(add|load|physics|anims|tweens|time|input|cameras|sound|textures|make|scene)\b/;
+
+/**
+ * Structural summary of every class in a file that looks like a Phaser
+ * scene (defines preload/create/update and/or uses Scene APIs): does it
+ * extend Phaser.Scene, does its constructor call super(), and is a
+ * `new Phaser.Game({ scene: ... })` registration present anywhere?
+ * Deterministic construction facts — the exact things a repair model must
+ * inspect when `this.add`/`this.load` is undefined INSIDE a lifecycle method.
+ */
+export function summarizeSceneConstruction(relFile: string, code: string, registryCode?: string): string[] {
+  // Scene registration may legitimately live in ANOTHER file — search the
+  // whole workspace source when provided, never claim absence from one file.
+  const registry = registryCode ?? code;
+  const out: string[] = [];
+  const classRe = /\bclass\s+([A-Za-z_$][\w$]*)(?:\s+extends\s+([\w.$]+))?\s*\{/g;
+  for (const m of code.matchAll(classRe)) {
+    const name = m[1];
+    const parent = m[2];
+    const bodyInfo = functionBody(code, m.index! + m[0].length - 1);
+    const body = bodyInfo?.body ?? "";
+    const lifecycle = /\b(?:preload|create|update)\s*\(/.test(body);
+    const usesSceneApi = SCENE_API.test(body);
+    if (!lifecycle && !usesSceneApi) continue;
+    const line = code.slice(0, m.index!).split("\n").length;
+    const extendsScene = parent === "Phaser.Scene";
+    const hasCtor = /\bconstructor\s*\(/.test(body);
+    const callsSuper = /\bsuper\s*\(/.test(body);
+    out.push(
+      `class ${name} (${relFile}:${line}) — extends: ${parent ?? "NOTHING (plain class)"}${
+        extendsScene ? "" : " ← NOT a Phaser.Scene: this.add/this.load/this.physics DO NOT EXIST on it, in ANY method, ever"
+      }${hasCtor && extendsScene && !callsSuper ? "; constructor never calls super() — Scene systems not initialized" : ""}`,
+    );
+  }
+  if (out.length) {
+    const reg = registry.match(/new\s+Phaser\.Game\s*\(([\s\S]{0,400}?)\)/);
+    if (reg) {
+      const sceneCfg = /\bscene\s*:/.test(reg[1]);
+      out.push(
+        sceneCfg
+          ? `Phaser.Game registration found (scene: config present)`
+          : `Phaser.Game registration found but it has NO scene: config — the class is never installed as a Scene`,
+      );
+    } else if (/new\s+[A-Za-z_$][\w$]*\s*\(\s*\)/.test(code) && !/new\s+Phaser\.Game/.test(registry)) {
+      out.push(`no new Phaser.Game(...) found anywhere in the workspace source — if the game class is instantiated manually (new MyGame()), Phaser never boots it as a Scene`);
+    }
+  }
+  return out;
+}
+
+/**
+ * Advisory (warning) construction check: a class that defines Phaser
+ * lifecycle methods or calls Scene APIs but does not extend Phaser.Scene is
+ * almost certainly the root cause of "Cannot read properties of undefined"
+ * on this.add/this.load. Warning severity (regex heuristic — never blocks
+ * the strict gate; the runtime exception it causes is the blocker).
+ */
+export function phaserSceneConstructionChecks(relFile: string, code: string, registryCode?: string): QAIssue[] {
+  const issues: QAIssue[] = [];
+  for (const summary of summarizeSceneConstruction(relFile, code, registryCode)) {
+    if (!summary.includes("NOT a Phaser.Scene") && !summary.includes("NO scene: config") && !summary.includes("never boots it as a Scene") && !summary.includes("never calls super()")) continue;
+    issues.push({
+      type: "static",
+      severity: "warning",
+      file: relFile,
+      message: `scene construction problem: ${summary.slice(0, 300)} — fix the class declaration/registration (extends Phaser.Scene + super(...) + new Phaser.Game({ scene: [...] })), do NOT move code between lifecycle methods`,
+    });
+  }
+  return issues;
+}
 
 /** Extract a function body by brace matching starting at the `{` after `start`. */
 function functionBody(code: string, start: number): { body: string; from: number } | null {
