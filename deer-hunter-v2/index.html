@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no" />
+<meta name="theme-color" content="#10170f" />
+<title>Forest Stalker — Wild Deer</title>
+<style>
+:root{--safeT:env(safe-area-inset-top,0px);--safeB:env(safe-area-inset-bottom,0px);--safeL:env(safe-area-inset-left,0px);--safeR:env(safe-area-inset-right,0px)}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;user-select:none}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#0b110c;color:white;font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;touch-action:none;overscroll-behavior:none}
+button{font:inherit} #game{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none}
+#grade,#vignette,#grain,#flash,#scope,#hitmark,#bloodMist,#focusHint{position:fixed;pointer-events:none}
+#grade{inset:0;background:linear-gradient(180deg,rgba(205,223,205,.02),rgba(23,38,23,.10) 57%,rgba(8,12,8,.18));mix-blend-mode:multiply}
+#vignette{inset:0;background:radial-gradient(ellipse at 50% 46%,transparent 34%,rgba(0,0,0,.08) 63%,rgba(0,0,0,.56) 108%)}
+#grain{inset:-20%;opacity:.022;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.78' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.72'/%3E%3C/svg%3E");animation:grain .32s steps(2) infinite}
+@keyframes grain{0%{transform:translate(0)}33%{transform:translate(1.5%,-1%)}66%{transform:translate(-1%,1.6%)}100%{transform:translate(.5%,-.4%)}}
+#flash{inset:0;z-index:61;background:rgba(255,244,206,0);transition:background .09s}
+#hud{position:fixed;inset:0;z-index:12;pointer-events:none;padding:calc(12px + var(--safeT)) calc(12px + var(--safeR)) calc(14px + var(--safeB)) calc(12px + var(--safeL))}
+.top{display:flex;align-items:flex-start;justify-content:space-between;gap:9px}.glass{background:linear-gradient(180deg,rgba(10,17,11,.72),rgba(5,9,6,.48));border:1px solid rgba(255,255,255,.13);box-shadow:0 10px 30px rgba(0,0,0,.22),inset 0 1px rgba(255,255,255,.045);backdrop-filter:blur(11px);-webkit-backdrop-filter:blur(11px)}
+#objective{border-radius:13px;padding:9px 11px;min-width:149px}#objective b,#range small{display:block;font-size:8px;line-height:1;letter-spacing:.19em;color:#bfcabd}#objective span{display:block;font-weight:820;font-size:13px;margin-top:5px;letter-spacing:-.01em}#range{border-radius:13px;padding:9px 10px;text-align:right;min-width:69px}#range span{display:block;font-size:16px;font-weight:850;font-variant-numeric:tabular-nums;margin-top:3px}
+#wind{position:absolute;left:calc(12px + var(--safeL));top:calc(77px + var(--safeT));border-radius:11px;padding:7px 9px;font-size:9px;color:#cad4c9;letter-spacing:.09em}#wind strong{color:#fff;font-size:10px;margin-left:4px}
+#centerDot{position:fixed;left:50%;top:47%;z-index:15;width:6px;height:6px;border:1px solid rgba(255,255,255,.88);border-radius:50%;transform:translate(-50%,-50%);box-shadow:0 0 8px rgba(255,255,255,.45);pointer-events:none;transition:opacity .15s}
+#focusHint{left:50%;top:51%;transform:translateX(-50%);z-index:15;color:rgba(255,255,255,.65);font-size:9px;letter-spacing:.13em;opacity:0;transition:.2s}
+#focusHint.show{opacity:1}
+#scope{inset:0;z-index:25;display:none;overflow:hidden}
+#scopeShade{position:absolute;inset:0;background:radial-gradient(circle at 50% 49%,transparent 0 37.6vmin,rgba(0,0,0,.995) 38.3vmin 100%)}
+#scopeGlass{position:absolute;left:50%;top:49%;width:75.5vmin;height:75.5vmin;transform:translate(-50%,-50%);border-radius:50%;background:radial-gradient(circle at 45% 42%,rgba(190,220,201,.055),rgba(15,31,19,.035) 52%,rgba(0,0,0,.23) 91%);box-shadow:inset 0 0 70px rgba(0,0,0,.52),inset 0 0 0 2px rgba(255,255,255,.055),0 0 0 1px rgba(0,0,0,.95)}
+#reticle{position:absolute;left:50%;top:49%;width:69vmin;height:69vmin;transform:translate(-50%,-50%)}
+#reticle:before,#reticle:after{content:"";position:absolute;background:rgba(7,8,7,.91)}#reticle:before{left:50%;top:0;width:1px;height:100%;transform:translateX(-50%)}#reticle:after{top:50%;left:0;width:100%;height:1px;transform:translateY(-50%)}
+.retDot{position:absolute;left:50%;width:4px;height:2px;background:#080908;transform:translateX(-50%);opacity:.92}.retDot.d1{top:56%}.retDot.d2{top:62%}.retDot.d3{top:68%}.retDot.d4{top:74%}
+#scopeReadout{position:absolute;left:50%;top:calc(49% + 28vmin);transform:translateX(-50%);color:rgba(10,12,10,.82);font:800 9px/1.15 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.10em;text-align:center;white-space:nowrap}
+#scopeEdge{position:absolute;left:50%;top:49%;width:77vmin;height:77vmin;transform:translate(-50%,-50%);border:2px solid rgba(0,0,0,.95);border-radius:50%;box-shadow:0 0 0 100vmax rgba(0,0,0,.985)}
+#controls{position:fixed;inset:0;z-index:35;pointer-events:none}.control{pointer-events:auto;border:1px solid rgba(255,255,255,.15);color:#fff;text-shadow:0 1px 2px #000;background:linear-gradient(180deg,rgba(38,50,41,.86),rgba(10,15,12,.89));box-shadow:0 9px 28px rgba(0,0,0,.34),inset 0 1px rgba(255,255,255,.07);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);touch-action:none}
+#aimBtn{position:absolute;right:calc(17px + var(--safeR));bottom:calc(112px + var(--safeB));width:70px;height:70px;border-radius:50%;font-size:11px;letter-spacing:.10em;font-weight:900}#fireBtn{position:absolute;right:calc(22px + var(--safeR));bottom:calc(20px + var(--safeB));width:84px;height:84px;border-radius:50%;font-size:11px;letter-spacing:.11em;font-weight:950;background:radial-gradient(circle at 34% 27%,#b04a3e 0,#7a2b23 50%,#3e1612 100%);border:2px solid rgba(255,229,210,.25)}#fireBtn:active,#aimBtn:active,#reloadBtn:active{transform:scale(.96)}
+#reloadBtn{position:absolute;left:calc(16px + var(--safeL));bottom:calc(23px + var(--safeB));width:62px;height:52px;border-radius:14px;font-size:9px;letter-spacing:.08em;font-weight:850}#ammo{position:absolute;right:calc(19px + var(--safeR));bottom:calc(198px + var(--safeB));pointer-events:none;border-radius:12px;padding:8px 10px;font-weight:900;font-variant-numeric:tabular-nums;background:rgba(4,8,5,.59);border:1px solid rgba(255,255,255,.12);box-shadow:0 7px 22px rgba(0,0,0,.2)}#ammo span{font-size:20px}#ammo small{font-size:9px;color:#b8c5b7}
+#steady{position:absolute;left:calc(16px + var(--safeL));bottom:calc(87px + var(--safeB));width:62px;height:52px;border-radius:14px;font-size:9px;font-weight:850;letter-spacing:.07em;display:none}#steady.active{background:linear-gradient(180deg,rgba(80,102,78,.92),rgba(18,29,20,.92))}
+#message{position:fixed;left:50%;top:21%;z-index:55;transform:translate(-50%,-50%) scale(.96);padding:10px 14px;border-radius:14px;opacity:0;transition:.18s;white-space:nowrap;font-weight:850;font-size:12px;letter-spacing:.02em;background:rgba(6,10,7,.72);border:1px solid rgba(255,255,255,.14);backdrop-filter:blur(10px);pointer-events:none}#message.show{opacity:1;transform:translate(-50%,-50%) scale(1)}
+#hitmark{left:50%;top:49%;width:29px;height:29px;z-index:60;transform:translate(-50%,-50%) rotate(45deg);opacity:0}#hitmark:before,#hitmark:after{content:"";position:absolute;background:#fff;box-shadow:0 0 5px rgba(0,0,0,.75)}#hitmark:before{left:14px;top:0;width:2px;height:29px}#hitmark:after{left:0;top:14px;width:29px;height:2px}#hitmark.show{animation:hit .34s ease-out}@keyframes hit{0%{opacity:0;transform:translate(-50%,-50%) rotate(45deg) scale(.4)}30%{opacity:1;transform:translate(-50%,-50%) rotate(45deg) scale(1)}100%{opacity:0;transform:translate(-50%,-50%) rotate(45deg) scale(1.28)}}
+#bloodMist{left:50%;top:49%;z-index:58;width:44px;height:44px;transform:translate(-50%,-50%);opacity:0;border-radius:50%;background:radial-gradient(circle,rgba(110,23,16,.60),rgba(80,15,11,.18) 42%,transparent 72%);filter:blur(3px)}#bloodMist.show{animation:blood .48s ease-out}@keyframes blood{0%{opacity:0;transform:translate(-50%,-50%) scale(.35)}25%{opacity:.7}100%{opacity:0;transform:translate(-50%,-50%) scale(2.2)}}
+#intro{position:fixed;inset:0;z-index:100;display:flex;flex-direction:column;justify-content:flex-end;padding:calc(28px + var(--safeT)) 21px calc(30px + var(--safeB));background:linear-gradient(180deg,rgba(3,8,5,.06),rgba(4,8,5,.86) 78%),radial-gradient(circle at 50% 24%,rgba(151,181,144,.12),transparent 45%)}#introCard{border-radius:22px;padding:21px 19px;background:rgba(7,12,8,.74);border:1px solid rgba(255,255,255,.13);box-shadow:0 23px 70px rgba(0,0,0,.42);backdrop-filter:blur(17px)}#intro h1{font-size:34px;line-height:.93;letter-spacing:-.055em;margin:0 0 12px}#intro h1 em{display:block;color:#b7cdb0;font-style:normal}#intro p{font-size:12px;line-height:1.55;color:#c7d1c6;margin:0}#start{width:100%;margin-top:16px;padding:15px;border:0;border-radius:14px;background:#dae5d4;color:#101510;font-size:14px;font-weight:950;letter-spacing:.08em}#tip{font-size:9px!important;text-align:center;margin-top:9px!important;color:#899589!important;letter-spacing:.05em}
+#result{display:none;position:fixed;inset:0;z-index:110;align-items:center;justify-content:center;padding:22px;background:rgba(3,7,4,.72);backdrop-filter:blur(14px)}#resultBox{width:min(360px,100%);border-radius:23px;padding:23px;background:#0c140e;border:1px solid rgba(255,255,255,.14);box-shadow:0 26px 80px rgba(0,0,0,.52);text-align:center}#resultBadge{font-size:37px}#result h2{margin:5px 0 7px;font-size:27px}#result p{margin:0;color:#b8c5b8;font-size:12px;line-height:1.55}#again{width:100%;margin-top:13px;padding:14px;border:0;border-radius:13px;background:#d8e3d2;color:#111;font-weight:950;letter-spacing:.05em}
+#orientation{display:none;position:fixed;inset:0;z-index:200;align-items:center;justify-content:center;background:#081009;color:#fff;text-align:center;padding:28px;font-weight:850;line-height:1.5}@media (orientation:landscape) and (max-height:600px){#orientation{display:flex}}
+@media (max-width:390px){#aimBtn{width:65px;height:65px;bottom:calc(106px + var(--safeB))}#fireBtn{width:79px;height:79px}.top{gap:7px}#objective{min-width:135px}#objective span{font-size:12px}}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="grade"></div><div id="vignette"></div><div id="grain"></div><div id="flash"></div>
+<div id="hud"><div class="top"><div id="objective" class="glass"><b>OBJECTIVE</b><span>Wild deer · one target</span></div><div id="range" class="glass"><small>RANGE</small><span>-- m</span></div></div><div id="wind" class="glass">WIND <strong>↗ 2.1</strong></div></div>
+<div id="centerDot"></div><div id="focusHint">TARGET NEAR RETICLE</div>
+<div id="scope"><div id="scopeShade"></div><div id="scopeGlass"></div><div id="scopeEdge"></div><div id="reticle"><i class="retDot d1"></i><i class="retDot d2"></i><i class="retDot d3"></i><i class="retDot d4"></i></div><div id="scopeReadout">6× · 100 m ZERO</div></div>
+<div id="controls"><div id="ammo"><span>5</span><small> / 15</small></div><button id="steady" class="control">STEADY</button><button id="aimBtn" class="control">AIM</button><button id="fireBtn" class="control">FIRE</button><button id="reloadBtn" class="control">RELOAD</button></div>
+<div id="message"></div><div id="hitmark"></div><div id="bloodMist"></div>
+<div id="intro"><div id="introCard"><h1>FOREST <em>STALKER</em></h1><p>Find the wild deer in the trees. Drag anywhere to look around. Tap <b>AIM</b>, line up the scope, then fire. The controls are tuned for one-thumb portrait play.</p><button id="start">START HUNT</button><p id="tip">Portrait · headphones recommended · drag slowly while scoped</p></div></div>
+<div id="result"><div id="resultBox"><div id="resultBadge">🦌</div><h2 id="resultTitle">Clean Hunt</h2><p id="resultText">Target down.</p><button id="again">HUNT AGAIN</button></div></div>
+<div id="orientation">Rotate back to portrait<br>for the intended experience.</div>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+
+const $=s=>document.querySelector(s), canvas=$('#game');
+const renderer=new THREE.WebGLRenderer({canvas,antialias:true,powerPreference:'high-performance',alpha:false});
+renderer.setPixelRatio(Math.min(devicePixelRatio,1.65));renderer.setSize(innerWidth,innerHeight,false);renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap;renderer.toneMapping=THREE.ACESFilmicToneMapping;renderer.toneMappingExposure=1.02;renderer.outputColorSpace=THREE.SRGBColorSpace;
+const scene=new THREE.Scene();scene.background=new THREE.Color(0x9aab9a);scene.fog=new THREE.FogExp2(0x758676,.0195);
+const camera=new THREE.PerspectiveCamera(56,innerWidth/innerHeight,.08,240);camera.position.set(0,1.72,7.8);camera.rotation.order='YXZ';
+const hemi=new THREE.HemisphereLight(0xdce6d8,0x273024,1.28);scene.add(hemi);const sun=new THREE.DirectionalLight(0xffe8c0,2.3);sun.position.set(-28,42,18);sun.castShadow=true;sun.shadow.mapSize.set(1024,1024);sun.shadow.camera.left=-50;sun.shadow.camera.right=50;sun.shadow.camera.top=48;sun.shadow.camera.bottom=-48;sun.shadow.bias=-.00035;scene.add(sun);
+
+function terrainY(x,z){return Math.sin(x*.115)*.30+Math.cos(z*.085)*.26+Math.sin((x+z)*.047)*.23+Math.cos((x-z)*.026)*.12}
+const groundGeo=new THREE.PlaneGeometry(190,190,84,84);groundGeo.rotateX(-Math.PI/2);const gp=groundGeo.attributes.position;for(let i=0;i<gp.count;i++){const x=gp.getX(i),z=gp.getZ(i);gp.setY(i,terrainY(x,z))}groundGeo.computeVertexNormals();const ground=new THREE.Mesh(groundGeo,new THREE.MeshStandardMaterial({color:0x354b30,roughness:1}));ground.receiveShadow=true;scene.add(ground);
+
+let seed=8675309;const rnd=()=>((seed=Math.imul(seed,1664525)+1013904223>>>0)/4294967296);const dummy=new THREE.Object3D();
+function scatterTrees(){
+ const trunkGeo=new THREE.CylinderGeometry(.15,.27,3.7,7),trunkMat=new THREE.MeshStandardMaterial({color:0x4b3b2a,roughness:1});
+ const crownGeo=new THREE.ConeGeometry(1.22,4.3,8),crownMat=new THREE.MeshStandardMaterial({color:0x29462d,roughness:1});
+ const trunkGeo2=new THREE.CylinderGeometry(.12,.22,3.1,7),trunkMat2=new THREE.MeshStandardMaterial({color:0x5b4934,roughness:1});
+ const crownGeo2=new THREE.IcosahedronGeometry(1.18,1),crownMat2=new THREE.MeshStandardMaterial({color:0x3c5b38,roughness:1});
+ const n=155,trunks=new THREE.InstancedMesh(trunkGeo,trunkMat,n),crowns=new THREE.InstancedMesh(crownGeo,crownMat,n),trunks2=new THREE.InstancedMesh(trunkGeo2,trunkMat2,70),crowns2=new THREE.InstancedMesh(crownGeo2,crownMat2,70);trunks.castShadow=crowns.castShadow=trunks2.castShadow=crowns2.castShadow=true;
+ for(let i=0;i<n;i++){let x=(rnd()-.5)*112,z=-7-rnd()*120;if(Math.abs(x)<3.8&&z>-36)x+=(x<0?-1:1)*(7+rnd()*4);const s=.62+rnd()*1.15,y=terrainY(x,z);dummy.position.set(x,y+1.85*s,z);dummy.scale.set(s,s,s);dummy.rotation.y=rnd()*6.28;dummy.updateMatrix();trunks.setMatrixAt(i,dummy.matrix);dummy.position.set(x,y+(4.1+rnd()*.6)*s,z);dummy.scale.set(s*(.75+rnd()*.35),s*(.82+rnd()*.3),s*(.75+rnd()*.35));dummy.rotation.y=rnd()*6.28;dummy.updateMatrix();crowns.setMatrixAt(i,dummy.matrix)}
+ for(let i=0;i<70;i++){let x=(rnd()-.5)*105,z=-10-rnd()*112;if(Math.abs(x)<5&&z>-32)x+=Math.sign(x||1)*9;const s=.72+rnd()*.92,y=terrainY(x,z);dummy.position.set(x,y+1.55*s,z);dummy.scale.set(s,s,s);dummy.rotation.y=rnd()*6.28;dummy.updateMatrix();trunks2.setMatrixAt(i,dummy.matrix);dummy.position.set(x,y+3.25*s,z);dummy.scale.set(s*1.15,s*.9,s*1.15);dummy.rotation.y=rnd()*6.28;dummy.updateMatrix();crowns2.setMatrixAt(i,dummy.matrix)}
+ scene.add(trunks,crowns,trunks2,crowns2);
+}
+scatterTrees();
+function scatterGround(){
+ const shrubGeo=new THREE.IcosahedronGeometry(.42,1),shrubMat=new THREE.MeshStandardMaterial({color:0x48643d,roughness:1}),shrubs=new THREE.InstancedMesh(shrubGeo,shrubMat,125);shrubs.castShadow=true;
+ for(let i=0;i<125;i++){const x=(rnd()-.5)*100,z=-7-rnd()*104,s=.36+rnd()*.9;dummy.position.set(x,terrainY(x,z)+.22*s,z);dummy.scale.set(s*1.4,s*.66,s*1.1);dummy.rotation.set(rnd()*.2,rnd()*6.28,rnd()*.2);dummy.updateMatrix();shrubs.setMatrixAt(i,dummy.matrix)}scene.add(shrubs);
+ const rockGeo=new THREE.DodecahedronGeometry(.38,0),rockMat=new THREE.MeshStandardMaterial({color:0x62675a,roughness:1}),rocks=new THREE.InstancedMesh(rockGeo,rockMat,45);rocks.castShadow=true;rocks.receiveShadow=true;
+ for(let i=0;i<45;i++){const x=(rnd()-.5)*90,z=-10-rnd()*95,s=.35+rnd()*1.1;dummy.position.set(x,terrainY(x,z)+.15*s,z);dummy.scale.set(s*1.2,s*.55,s);dummy.rotation.set(rnd(),rnd()*6.28,rnd());dummy.updateMatrix();rocks.setMatrixAt(i,dummy.matrix)}scene.add(rocks);
+}
+scatterGround();
+
+const deerRoot=new THREE.Group();scene.add(deerRoot);let deerVisual=null,deerMixer=null,deerActions={},currentAction='';
+const hitBody=new THREE.Mesh(new THREE.SphereGeometry(1.05,14,10),new THREE.MeshBasicMaterial({transparent:true,opacity:0,depthWrite:false}));hitBody.position.set(0,1.18,0);hitBody.name='body';deerRoot.add(hitBody);
+const hitVital=new THREE.Mesh(new THREE.SphereGeometry(.48,12,9),new THREE.MeshBasicMaterial({transparent:true,opacity:0,depthWrite:false}));hitVital.position.set(.25,1.25,.02);hitVital.name='vital';deerRoot.add(hitVital);
+function fallbackDeer(){
+ const g=new THREE.Group(),fur=new THREE.MeshStandardMaterial({color:0x7a4b2b,roughness:.92}),dark=new THREE.MeshStandardMaterial({color:0x3c291e,roughness:.96}),cream=new THREE.MeshStandardMaterial({color:0xd0b58c,roughness:.95}),black=new THREE.MeshStandardMaterial({color:0x080908,roughness:.7}),ant=new THREE.MeshStandardMaterial({color:0x51402e,roughness:1});
+ const add=(geo,mat,p,s=[1,1,1],r=[0,0,0])=>{const m=new THREE.Mesh(geo,mat);m.position.set(...p);m.scale.set(...s);m.rotation.set(...r);m.castShadow=true;m.receiveShadow=true;g.add(m);return m};
+ add(new THREE.SphereGeometry(1,24,18),fur,[0,1.22,0],[1.36,.67,.56],[0,0,.02]);add(new THREE.SphereGeometry(.72,20,16),fur,[.82,1.35,0],[.72,.83,.64],[0,0,-.12]);add(new THREE.CylinderGeometry(.26,.39,1.25,14),fur,[1.17,1.92,0],[1,1,1],[0,0,-.48]);add(new THREE.SphereGeometry(.42,20,15),fur,[1.55,2.47,0],[1.13,.7,.67],[0,0,-.08]);add(new THREE.SphereGeometry(.22,16,12),dark,[1.93,2.39,0],[1.28,.56,.58]);add(new THREE.SphereGeometry(.065,12,8),black,[2.16,2.40,0]);add(new THREE.SphereGeometry(.048,10,8),black,[1.66,2.57,.29]);
+ add(new THREE.ConeGeometry(.15,.43,10),fur,[1.42,2.86,.28],[1,.9,.6],[0,0,-.28]);add(new THREE.ConeGeometry(.15,.43,10),fur,[1.42,2.86,-.28],[1,.9,.6],[0,0,-.28]);
+ for(const [x,z] of [[.72,.32],[.72,-.32],[-.72,.31],[-.72,-.31]]){add(new THREE.CylinderGeometry(.085,.12,1.08,10),fur,[x,.58,z]);add(new THREE.CylinderGeometry(.055,.075,.78,9),dark,[x,.02,z])}
+ add(new THREE.ConeGeometry(.19,.62,10),cream,[-1.33,1.45,0],[1,.85,.72],[0,0,1.18]);
+ const branch=(x,y,z,rx,rz,len=.67,rad=.035)=>add(new THREE.CylinderGeometry(rad,rad*.68,len,7),ant,[x,y,z],[1,1,1],[rx,0,rz]);for(const s of [-1,1]){branch(1.38,2.98,.14*s,.10*s,-.23,.77,.045);branch(1.27,3.30,.22*s,.55*s,-.32,.52,.035);branch(1.52,3.28,.21*s,-.43*s,-.18,.45,.032)}
+ g.scale.setScalar(.92);return g;
+}
+const fallback=fallbackDeer();deerRoot.add(fallback);deerVisual=fallback;
+function chooseClip(clips,terms){for(const t of terms){const c=clips.find(x=>x.name.toLowerCase().includes(t));if(c)return c}return clips[0]||null}
+function playAction(name,fade=.2){if(!deerMixer||!deerActions[name]||currentAction===name)return;const next=deerActions[name],prev=deerActions[currentAction];if(prev)prev.fadeOut(fade);next.reset().fadeIn(fade).play();currentAction=name}
+new GLTFLoader().load('https://raw.githubusercontent.com/Quaternius/TestGltfAssets/master/Deer/Deer.glb',gltf=>{
+ const model=gltf.scene;model.traverse(o=>{if(o.isMesh){o.castShadow=true;o.receiveShadow=true}});const box=new THREE.Box3().setFromObject(model),size=new THREE.Vector3();box.getSize(size);const sc=2.65/Math.max(.001,size.y);model.scale.setScalar(sc);const box2=new THREE.Box3().setFromObject(model);model.position.y-=box2.min.y;model.rotation.y=Math.PI/2;fallback.visible=false;deerRoot.add(model);deerVisual=model;deerMixer=new THREE.AnimationMixer(model);const clips=gltf.animations||[];for(const [key,terms] of Object.entries({idle:['idle','survey'],walk:['walk'],run:['run','gallop'],death:['death','die']})){const clip=chooseClip(clips,terms);if(clip){deerActions[key]=deerMixer.clipAction(clip);deerActions[key].setLoop(key==='death'?THREE.LoopOnce:THREE.LoopRepeat);if(key==='death')deerActions[key].clampWhenFinished=true}}playAction('idle',0);
+},undefined,()=>{});
+
+scene.add(camera);const rifle=new THREE.Group();camera.add(rifle);const gunMetal=new THREE.MeshStandardMaterial({color:0x171918,roughness:.28,metalness:.72}),wood=new THREE.MeshStandardMaterial({color:0x5a3821,roughness:.72}),rubber=new THREE.MeshStandardMaterial({color:0x090a09,roughness:.72});
+const addGun=(geo,mat,p,r=[0,0,0],s=[1,1,1])=>{const m=new THREE.Mesh(geo,mat);m.position.set(...p);m.rotation.set(...r);m.scale.set(...s);m.castShadow=true;rifle.add(m);return m};addGun(new THREE.BoxGeometry(.30,.25,1.36),wood,[.31,-.49,-1.45],[-.07,0,0]);addGun(new THREE.BoxGeometry(.31,.28,.25),rubber,[.31,-.49,-.75],[-.07,0,0]);addGun(new THREE.CylinderGeometry(.033,.042,2.82,14),gunMetal,[.29,-.32,-2.75],[Math.PI/2,0,0]);addGun(new THREE.CylinderGeometry(.085,.085,.88,18),gunMetal,[.29,-.13,-2.02],[Math.PI/2,0,0]);addGun(new THREE.CylinderGeometry(.112,.097,.22,18),gunMetal,[.29,-.13,-2.47],[Math.PI/2,0,0]);const lensMat=new THREE.MeshPhysicalMaterial({color:0x31524a,roughness:.06,metalness:.12,transparent:true,opacity:.8});addGun(new THREE.CylinderGeometry(.095,.095,.025,20),lensMat,[.29,-.13,-2.59],[Math.PI/2,0,0]);const bolt=addGun(new THREE.CylinderGeometry(.028,.028,.42,10),gunMetal,[.46,-.23,-1.84],[0,0,Math.PI/2]);const boltKnob=addGun(new THREE.SphereGeometry(.055,10,8),gunMetal,[.67,-.23,-1.84]);rifle.position.set(.73,-.62,.13);rifle.rotation.set(-.055,-.045,0);
+
+let running=false,aiming=false,steady=false,reloading=false,shots=5,reserve=15,deerState='idle',stateTime=0,startTime=0,last=performance.now(),health=2,nearMisses=0;let targetYaw=0,targetPitch=-.025,yaw=0,pitch=-.025,recoil=0,scopeSwayX=0,scopeSwayY=0;const raycaster=new THREE.Raycaster();
+const rangeUI=$('#range span'),ammoUI=$('#ammo span'),reserveUI=$('#ammo small'),msg=$('#message'),hitmark=$('#hitmark'),blood=$('#bloodMist'),scope=$('#scope'),centerDot=$('#centerDot'),focusHint=$('#focusHint');
+function clamp(v,a,b){return Math.max(a,Math.min(b,v))}function damp(a,b,lambda,dt){return THREE.MathUtils.lerp(a,b,1-Math.exp(-lambda*dt))}function updateAmmo(){ammoUI.textContent=shots;reserveUI.textContent=' / '+reserve}function showMsg(t,ms=900){msg.textContent=t;msg.classList.add('show');clearTimeout(showMsg.t);showMsg.t=setTimeout(()=>msg.classList.remove('show'),ms)}
+let ac,ambStarted=false;function audio(){if(!ac)ac=new (window.AudioContext||window.webkitAudioContext)();return ac}function noiseBuffer(sec=.35){const a=audio(),b=a.createBuffer(1,Math.floor(a.sampleRate*sec),a.sampleRate),d=b.getChannelData(0);for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;return b}
+function startAmbience(){if(ambStarted)return;ambStarted=true;const a=audio();const src=a.createBufferSource(),g=a.createGain(),f=a.createBiquadFilter();src.buffer=noiseBuffer(2.4);src.loop=true;f.type='lowpass';f.frequency.value=720;g.gain.value=.018;src.connect(f).connect(g).connect(a.destination);src.start();const chirp=()=>{if(!running){setTimeout(chirp,2400);return}const o=a.createOscillator(),gg=a.createGain(),t=a.currentTime;o.type='sine';o.frequency.setValueAtTime(2100+Math.random()*900,t);o.frequency.exponentialRampToValueAtTime(1500+Math.random()*600,t+.10);gg.gain.setValueAtTime(.018,t);gg.gain.exponentialRampToValueAtTime(.001,t+.14);o.connect(gg).connect(a.destination);o.start(t);o.stop(t+.15);setTimeout(chirp,2200+Math.random()*3900)};setTimeout(chirp,1300)}
+function clickSound(){const a=audio(),o=a.createOscillator(),g=a.createGain(),t=a.currentTime;o.type='square';o.frequency.value=205;g.gain.setValueAtTime(.055,t);g.gain.exponentialRampToValueAtTime(.001,t+.045);o.connect(g).connect(a.destination);o.start(t);o.stop(t+.05)}
+function gunshot(){const a=audio(),t=a.currentTime;const n=a.createBufferSource(),ng=a.createGain(),hp=a.createBiquadFilter();n.buffer=noiseBuffer(.32);hp.type='highpass';hp.frequency.value=140;ng.gain.setValueAtTime(.72,t);ng.gain.exponentialRampToValueAtTime(.001,t+.29);n.connect(hp).connect(ng).connect(a.destination);n.start(t);const o=a.createOscillator(),g=a.createGain();o.type='sine';o.frequency.setValueAtTime(92,t);o.frequency.exponentialRampToValueValueAtTime?.(36,t+.18);if(!o.frequency.exponentialRampToValueAtTime)o.frequency.setValueAtTime(36,t+.18);else o.frequency.exponentialRampToValueAtTime(36,t+.18);g.gain.setValueAtTime(.50,t);g.gain.exponentialRampToValueAtTime(.001,t+.22);o.connect(g).connect(a.destination);o.start(t);o.stop(t+.23);const delay=a.createDelay(.4),dg=a.createGain();delay.delayTime.value=.16;dg.gain.value=.17;n.connect(delay).connect(dg).connect(a.destination)}
+function boltSound(){const a=audio(),t=a.currentTime;for(const [f,at] of [[280,0],[190,.22]]){const o=a.createOscillator(),g=a.createGain();o.type='square';o.frequency.value=f;g.gain.setValueAtTime(.045,t+at);g.gain.exponentialRampToValueAtTime(.001,t+at+.04);o.connect(g).connect(a.destination);o.start(t+at);o.stop(t+at+.05)}}
+function haptic(ms=18){try{navigator.vibrate?.(ms)}catch{}}
+
+function setAim(v){if(reloading||!running)return;aiming=v;scope.style.display=v?'block':'none';centerDot.style.opacity=v?'0':'1';$('#aimBtn').textContent=v?'LOWER':'AIM';$('#steady').style.display=v?'block':'none';camera.fov=v?17.5:56;camera.updateProjectionMatrix();rifle.visible=!v;steady=false;$('#steady').classList.remove('active');clickSound()}
+$('#aimBtn').addEventListener('pointerdown',e=>{e.preventDefault();setAim(!aiming)});$('#fireBtn').addEventListener('pointerdown',e=>{e.preventDefault();fire()});$('#reloadBtn').addEventListener('pointerdown',e=>{e.preventDefault();reload()});$('#steady').addEventListener('pointerdown',e=>{e.preventDefault();steady=!steady;$('#steady').classList.toggle('active',steady);haptic(8)});
+
+function animateBolt(){bolt.position.x=.46;boltKnob.position.x=.67;let t0=performance.now();const f=()=>{const t=(performance.now()-t0)/520;if(t>=1){bolt.position.x=.46;boltKnob.position.x=.67;return}const q=t<.45?t/.45:(1-t)/.55,off=.23*Math.sin(q*Math.PI/2);bolt.position.x=.46+off;boltKnob.position.x=.67+off;requestAnimationFrame(f)};requestAnimationFrame(f)}
+function fire(){if(!running||reloading)return;if(shots<=0){showMsg('EMPTY · RELOAD');clickSound();haptic(10);return}shots--;updateAmmo();gunshot();haptic(30);recoil=aiming?.055:.105;$('#flash').style.background='rgba(255,244,210,.17)';setTimeout(()=>$('#flash').style.background='rgba(255,244,210,0)',75);animateBolt();
+ raycaster.setFromCamera(new THREE.Vector2(0,0),camera);const hit=raycaster.intersectObjects([hitVital,hitBody],false)[0];if(hit&&deerState!=='down'&&deerState!=='fall'){
+   hitmark.classList.remove('show');void hitmark.offsetWidth;hitmark.classList.add('show');blood.classList.remove('show');void blood.offsetWidth;blood.classList.add('show');const vital=hit.object.name==='vital';health-=vital?2:1;deerState=health<=0?'mortallyHit':'wounded';stateTime=0;playAction('run');showMsg(vital?'VITAL HIT':'BODY HIT',900);haptic(vital?[22,30,22]:18);
+ }else{nearMisses++;showMsg('MISS',520);if(nearMisses>=2&&deerState==='idle'){deerState='alert';stateTime=0;playAction('run')}}
+}
+function reload(){if(!running||reloading||shots===5||reserve<=0)return;reloading=true;if(aiming)setAim(false);showMsg('RELOADING…',1450);boltSound();rifle.rotation.z=-.08;setTimeout(()=>{rifle.rotation.z=0;const n=Math.min(5-shots,reserve);shots+=n;reserve-=n;reloading=false;updateAmmo();showMsg('READY',520)},1450)}
+
+let drag=false,lx=0,ly=0,velocityX=0,velocityY=0;const isControl=t=>t.closest&&t.closest('.control');
+addEventListener('pointerdown',e=>{if(!running||isControl(e.target))return;drag=true;lx=e.clientX;ly=e.clientY;velocityX=velocityY=0});addEventListener('pointermove',e=>{if(!drag)return;const dx=e.clientX-lx,dy=e.clientY-ly;lx=e.clientX;ly=e.clientY;const sens=aiming?.00135:.0032;velocityX=dx*sens;velocityY=dy*sens;targetYaw-=velocityX;targetPitch-=velocityY;targetPitch=clamp(targetPitch,-.38,.28)});const endDrag=()=>drag=false;addEventListener('pointerup',endDrag);addEventListener('pointercancel',endDrag);
+
+function resetGame(){shots=5;reserve=15;health=2;nearMisses=0;reloading=false;deerState='idle';stateTime=0;deerRoot.position.set(-2.2,terrainY(-2.2,-34),-34);deerRoot.rotation.set(0,-Math.PI/2+.1,0);deerRoot.visible=true;targetYaw=yaw=0;targetPitch=pitch=-.025;camera.fov=56;camera.updateProjectionMatrix();aiming=false;scope.style.display='none';centerDot.style.opacity='1';rifle.visible=true;$('#aimBtn').textContent='AIM';$('#steady').style.display='none';$('#result').style.display='none';running=true;startTime=performance.now();updateAmmo();playAction('idle',0);showMsg('FIND THE DEER',1200)}
+$('#start').onclick=()=>{audio().resume();startAmbience();$('#intro').style.display='none';resetGame()};$('#again').onclick=()=>resetGame();
+function finish(title,text){running=false;if(aiming){aiming=false;scope.style.display='none';centerDot.style.opacity='1';rifle.visible=true}$('#resultTitle').textContent=title;$('#resultText').textContent=text;$('#result').style.display='flex'}
+
+function faceVelocity(dx,dz){if(Math.abs(dx)+Math.abs(dz)<.0001)return;deerRoot.rotation.y=Math.atan2(dx,dz)+Math.PI/2}
+let walkPhase=0;
+function moveDeer(dt){stateTime+=dt;walkPhase+=dt;const oldX=deerRoot.position.x,oldZ=deerRoot.position.z;
+ if(deerState==='idle'){
+   const x=-2.2+Math.sin(stateTime*.34)*3.0,z=-34+Math.cos(stateTime*.22)*2.4;deerRoot.position.x=damp(deerRoot.position.x,x,1.15,dt);deerRoot.position.z=damp(deerRoot.position.z,z,1.15,dt);deerRoot.position.y=terrainY(deerRoot.position.x,deerRoot.position.z);if(deerMixer)playAction(Math.sin(stateTime*.55)>.35?'walk':'idle');else fallback.rotation.z=Math.sin(stateTime*.6)*.008;
+ }else if(deerState==='alert'){
+   deerRoot.position.x+=dt*7.2;deerRoot.position.z-=dt*1.8;deerRoot.position.y=terrainY(deerRoot.position.x,deerRoot.position.z);if(stateTime>4.5)finish('Deer Escaped','The deer heard the shots and disappeared into the timber.');
+ }else if(deerState==='wounded'){
+   deerRoot.position.x+=dt*6.4;deerRoot.position.z-=dt*2.35;deerRoot.position.y=terrainY(deerRoot.position.x,deerRoot.position.z);if(stateTime>5.4)finish('Deer Escaped','You made a non-vital hit. The deer escaped before a follow-up shot.');
+ }else if(deerState==='mortallyHit'){
+   deerRoot.position.x+=dt*(stateTime<1.6?7.2:4.2);deerRoot.position.z-=dt*2.1;deerRoot.position.y=terrainY(deerRoot.position.x,deerRoot.position.z);if(stateTime>2.15){deerState='fall';stateTime=0;playAction('death')}
+ }else if(deerState==='fall'){
+   if(!deerMixer)deerRoot.rotation.z=damp(deerRoot.rotation.z,Math.PI/2,2.8,dt);if(stateTime>1.45){deerState='down';showMsg('TARGET DOWN',1000);setTimeout(()=>{const sec=((performance.now()-startTime)/1000).toFixed(1);finish('Clean Hunt',`Vital shot. Target down in ${sec}s.`)},700)}
+ }
+ const dx=deerRoot.position.x-oldX,dz=deerRoot.position.z-oldZ;if(['idle','alert','wounded','mortallyHit'].includes(deerState)&&Math.hypot(dx,dz)>.002)faceVelocity(dx,dz);
+ if(!deerMixer&&['idle','alert','wounded','mortallyHit'].includes(deerState)){const speed=deerState==='idle'?4.5:13;fallback.position.y=Math.abs(Math.sin(stateTime*speed))*(deerState==='idle'?.018:.085)}
+}
+
+function targetScreenDistance(){const p=deerRoot.position.clone().add(new THREE.Vector3(0,1.25,0)).project(camera);return Math.hypot(p.x,p.y)}
+function loop(now){requestAnimationFrame(loop);const dt=Math.min(.033,(now-last)/1000);last=now;if(running)moveDeer(dt);if(deerMixer)deerMixer.update(dt);
+ yaw=damp(yaw,targetYaw,aiming?13:18,dt);pitch=damp(pitch,targetPitch,aiming?13:18,dt);const t=now*.001,breath=aiming&&!steady?1:steady?.23:0;scopeSwayX=Math.sin(t*1.35)*.0018*breath+Math.sin(t*.47)*.0008*breath;scopeSwayY=Math.sin(t*1.05+1.4)*.00125*breath;recoil=damp(recoil,0,15,dt);camera.rotation.y=yaw+scopeSwayX;camera.rotation.x=pitch+scopeSwayY+recoil;
+ if(!aiming){rifle.position.y=-.62+Math.sin(t*1.7)*.006;rifle.rotation.x=-.055+Math.sin(t*.9)*.0025}
+ const dist=camera.position.distanceTo(deerRoot.position);rangeUI.textContent=Math.round(dist)+' m';$('#scopeReadout').textContent=`6× · ${Math.round(dist)} m · 100 m ZERO`;const near=running&&deerState!=='down'&&targetScreenDistance()<.17;focusHint.classList.toggle('show',near&&!aiming);renderer.render(scene,camera)}requestAnimationFrame(loop);
+addEventListener('resize',()=>{renderer.setSize(innerWidth,innerHeight,false);camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix()});
+</script>
+</body>
+</html>
